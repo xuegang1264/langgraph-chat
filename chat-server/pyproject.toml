@@ -1,0 +1,22 @@
+[project]
+name = "chat-server"
+version = "0.1.0"
+description = "FastAPI and LangGraph chat backend"
+requires-python = ">=3.10"
+dependencies = [
+    "dashscope>=1.20,<2.0",
+    "fastapi>=0.115,<1.0",
+    "httpx>=0.28.1",
+    "langgraph>=1.0,<2.0",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "python-dotenv>=1.0,<2.0",
+    "uvicorn[standard]>=0.30,<1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

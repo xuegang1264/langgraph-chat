@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'chatGroups'
-const MAIN_CHAT_ID = 'main-chat'
+const MAIN_CHAT_ID = 'e6ead6c0-9188-4fdd-b82d-51dbeeb283b3'
 
 const members = [
   { name: '产品经理', persona: '关注用户需求，输出产品方案，把控需求范围，说话务实，会平衡业务和技术可行性。' },
@@ -20,6 +20,12 @@ const groups = ref([])
 const selectedGroupId = ref(MAIN_CHAT_ID)
 const selectedGroup = computed(() => groups.value.find(g => g.id === selectedGroupId.value))
 const isMainChat = computed(() => selectedGroupId.value === MAIN_CHAT_ID)
+
+const messages = ref([
+  { role: 'assistant', content: '你好，有什么可以帮你的？' }
+])
+const messageInput = ref('')
+const isSending = ref(false)
 
 const showModal = ref(false)
 const groupName = ref('')
@@ -117,6 +123,40 @@ function removeMember(member) {
   saveGroups()
 }
 
+async function sendMessage() {
+  const content = messageInput.value.trim()
+  if (!content || isSending.value || !isMainChat.value) return
+
+  messages.value.push({ role: 'user', content })
+  messageInput.value = ''
+  isSending.value = true
+
+  try {
+    const response = await fetch('/api/agent/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: MAIN_CHAT_ID,
+        message: content
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+
+    const data = await response.json()
+    messages.value.push(data.message)
+  } catch (error) {
+    messages.value.push({
+      role: 'assistant',
+      content: `发送失败：${error instanceof Error ? error.message : '未知错误'}`
+    })
+  } finally {
+    isSending.value = false
+  }
+}
+
 onMounted(loadGroups)
 </script>
 
@@ -150,16 +190,29 @@ onMounted(loadGroups)
       <main class="chat-main">
         <div class="chat-content">
           <div class="chat-messages">
-            <div class="message message-left">
-              <div class="bubble">你好，有什么可以帮你的？</div>
-            </div>
-            <div class="message message-right">
-              <div class="bubble">帮我写一个简单的聊天页面。</div>
+            <div
+              v-for="(msg, index) in messages"
+              :key="index"
+              class="message"
+              :class="msg.role === 'user' ? 'message-right' : 'message-left'"
+            >
+              <div class="bubble">{{ msg.content }}</div>
             </div>
           </div>
           <div class="chat-input">
-            <input type="text" placeholder="输入消息..." />
-            <button>发送</button>
+            <input
+              v-model="messageInput"
+              type="text"
+              placeholder="输入消息..."
+              :disabled="isSending || !isMainChat"
+              @keyup.enter="sendMessage"
+            />
+            <button
+              :disabled="isSending || !messageInput.trim() || !isMainChat"
+              @click="sendMessage"
+            >
+              {{ isSending ? '发送中...' : '发送' }}
+            </button>
           </div>
         </div>
         <aside v-if="isMainChat" class="group-info project-info">
@@ -462,6 +515,17 @@ onMounted(loadGroups)
 .chat-input button:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(170, 59, 255, 0.25);
+}
+
+.chat-input input:disabled,
+.chat-input button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chat-input button:disabled:hover {
+  transform: none;
+  box-shadow: none;
 }
 
 .group-info {

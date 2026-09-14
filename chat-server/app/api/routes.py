@@ -1,0 +1,17 @@
+from fastapi import APIRouter
+
+from app.api.agent import router as agent_router
+
+
+router = APIRouter()
+router.include_router(agent_router, prefix="/agent", tags=["agent"])
+
+
+@router.get("/")
+async def root() -> dict[str, str]:
+    return {"service": "chat-server", "status": "running"}
+
+
+@router.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
