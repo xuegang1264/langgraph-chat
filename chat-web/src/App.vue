@@ -154,7 +154,8 @@ function buildChatPayload(threadId, content) {
 
 const messages = ref([...DEFAULT_MESSAGES])
 const messageInput = ref('')
-const isSending = ref(false)
+const sendingThreadIds = ref([])
+const deletingThreadIds = ref([])
 const isLoadingHistory = ref(false)
 let historyRequestId = 0
 
@@ -171,6 +172,33 @@ const availableMembers = computed(() => {
   const existing = new Set(selectedGroup.value.members.map(m => m.name))
   return members.filter(m => !existing.has(m.name))
 })
+const isCurrentSending = computed(() => sendingThreadIds.value.includes(selectedGroupId.value))
+
+function isDeletingThread(threadId) {
+  return deletingThreadIds.value.includes(threadId)
+}
+
+function setThreadSending(threadId, sending) {
+  if (sending) {
+    if (!sendingThreadIds.value.includes(threadId)) {
+      sendingThreadIds.value = [...sendingThreadIds.value, threadId]
+    }
+    return
+  }
+
+  sendingThreadIds.value = sendingThreadIds.value.filter(id => id !== threadId)
+}
+
+function setThreadDeleting(threadId, deleting) {
+  if (deleting) {
+    if (!deletingThreadIds.value.includes(threadId)) {
+      deletingThreadIds.value = [...deletingThreadIds.value, threadId]
+    }
+    return
+  }
+
+  deletingThreadIds.value = deletingThreadIds.value.filter(id => id !== threadId)
+}
 
 function renderMarkdown(content) {
   return markdown.render(content || '')
@@ -212,6 +240,10 @@ async function handleGroupChatStream(response, threadId) {
 
       if (rawEvent) {
         const event = parseSseEvent(rawEvent)
+        if (event.type === 'done') {
+          return
+        }
+
         if (event.type === 'error') {
           const data = JSON.parse(event.data)
           throw new Error(data.detail || '群聊流式响应失败')
@@ -219,6 +251,64 @@ async function handleGroupChatStream(response, threadId) {
 
         if (event.type === 'message' && selectedGroupId.value === threadId) {
           messages.value.push(JSON.parse(event.data))
+          await scrollMessagesToBottom()
+        }
+      }
+
+      boundary = buffer.indexOf('\n\n')
+    }
+
+    if (done) break
+  }
+}
+
+async function handleMainChatStream(response, threadId) {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let assistantIndex = -1
+
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary !== -1) {
+      const rawEvent = buffer.slice(0, boundary).trim()
+      buffer = buffer.slice(boundary + 2)
+
+      if (rawEvent) {
+        const event = parseSseEvent(rawEvent)
+        if (event.type === 'done') {
+          return
+        }
+
+        const data = JSON.parse(event.data)
+
+        if (event.type === 'error') {
+          throw new Error(data.detail || '主对话流式响应失败')
+        }
+
+        if (selectedGroupId.value === threadId && event.type === 'token') {
+          if (assistantIndex === -1) {
+            messages.value.push({ role: 'assistant', content: '' })
+            assistantIndex = messages.value.length - 1
+          }
+          messages.value[assistantIndex].content += data.token || ''
+          await scrollMessagesToBottom()
+        }
+
+        if (selectedGroupId.value === threadId && event.type === 'message') {
+          if (assistantIndex === -1) {
+            messages.value.push(data)
+            assistantIndex = messages.value.length - 1
+          } else {
+            messages.value[assistantIndex] = data
+          }
           await scrollMessagesToBottom()
         }
       }
@@ -339,14 +429,41 @@ function removeMember(member) {
   saveGroups()
 }
 
+async function deleteGroup(group) {
+  if (isDeletingThread(group.id) || sendingThreadIds.value.includes(group.id)) return
+  if (!window.confirm(`确认删除「${group.name}」及其聊天记录吗？`)) return
+
+  setThreadDeleting(group.id, true)
+  try {
+    const response = await fetch(
+      `/api/group-chat/history?thread_id=${encodeURIComponent(group.id)}`,
+      { method: 'DELETE' }
+    )
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+
+    groups.value = groups.value.filter(item => item.id !== group.id)
+    saveGroups()
+
+    if (selectedGroupId.value === group.id) {
+      selectGroup(MAIN_CHAT_ID)
+    }
+  } catch (error) {
+    window.alert(`删除失败：${error instanceof Error ? error.message : '未知错误'}`)
+  } finally {
+    setThreadDeleting(group.id, false)
+  }
+}
+
 async function sendMessage() {
   const content = messageInput.value.trim()
-  if (!content || isSending.value || isLoadingHistory.value) return
+  if (!content || isCurrentSending.value || isLoadingHistory.value) return
 
   const threadId = selectedGroupId.value
   messages.value.push({ role: 'user', content })
   messageInput.value = ''
-  isSending.value = true
+  setThreadSending(threadId, true)
   await scrollMessagesToBottom()
 
   try {
@@ -361,11 +478,7 @@ async function sendMessage() {
     }
 
     if (threadId === MAIN_CHAT_ID) {
-      const data = await response.json()
-      if (selectedGroupId.value === threadId) {
-        messages.value.push(data.message)
-        await scrollMessagesToBottom()
-      }
+      await handleMainChatStream(response, threadId)
     } else {
       await handleGroupChatStream(response, threadId)
     }
@@ -378,7 +491,7 @@ async function sendMessage() {
       await scrollMessagesToBottom()
     }
   } finally {
-    isSending.value = false
+    setThreadSending(threadId, false)
   }
 }
 
@@ -411,7 +524,15 @@ onMounted(() => {
             :class="{ active: selectedGroupId === group.id }"
             @click="selectGroup(group.id)"
           >
-            {{ group.name }}
+            <span class="group-name">{{ group.name }}</span>
+            <button
+              class="delete-group-btn"
+              :disabled="isDeletingThread(group.id) || sendingThreadIds.includes(group.id)"
+              title="删除对话"
+              @click.stop="deleteGroup(group)"
+            >
+              {{ isDeletingThread(group.id) ? '...' : '×' }}
+            </button>
           </div>
         </div>
       </aside>
@@ -441,14 +562,14 @@ onMounted(() => {
               v-model="messageInput"
               type="text"
               placeholder="输入消息..."
-              :disabled="isSending || isLoadingHistory"
+              :disabled="isCurrentSending || isLoadingHistory"
               @keyup.enter="sendMessage"
             />
             <button
-              :disabled="isSending || isLoadingHistory || !messageInput.trim()"
+              :disabled="isCurrentSending || isLoadingHistory || !messageInput.trim()"
               @click="sendMessage"
             >
-              {{ isSending ? '发送中...' : isLoadingHistory ? '加载中...' : '发送' }}
+              {{ isCurrentSending ? '发送中...' : isLoadingHistory ? '加载中...' : '发送' }}
             </button>
           </div>
         </div>
@@ -650,6 +771,10 @@ onMounted(() => {
 }
 
 .group-tag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 14px 16px;
   border-radius: 12px;
   border: 1px solid transparent;
@@ -660,6 +785,37 @@ onMounted(() => {
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+
+.group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delete-group-btn {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.delete-group-btn:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.delete-group-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .group-tag:hover {

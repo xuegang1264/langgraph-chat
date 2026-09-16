@@ -20,6 +20,20 @@ def _to_model_message(message: BaseMessage) -> dict[str, str] | None:
     return {"role": role, "content": str(message.content)}
 
 
+def build_main_chat_model_messages(
+    state: dict[str, Any],
+    current_message: str,
+) -> list[dict[str, str]]:
+    history_messages = state.get("messages", [])
+    messages = [
+        model_message
+        for message in history_messages
+        if (model_message := _to_model_message(message)) is not None
+    ]
+    messages.append({"role": "user", "content": current_message})
+    return messages
+
+
 async def main_chat_node(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     current_message = str(state.get("current_message", "")).strip()
     if not current_message:
@@ -29,13 +43,7 @@ async def main_chat_node(state: dict[str, Any], config: RunnableConfig) -> dict[
     if not settings.dashscope_api_key:
         return {"messages": [user_message]}
 
-    history_messages = state.get("messages", [])
-    messages = [
-        model_message
-        for message in history_messages
-        if (model_message := _to_model_message(message)) is not None
-    ]
-    messages.append({"role": "user", "content": current_message})
+    messages = build_main_chat_model_messages(state, current_message)
 
     content = await dashscope.chat(
         thread_id=str(config.get("configurable", {}).get("thread_id", "")),

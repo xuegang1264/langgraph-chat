@@ -31,6 +31,7 @@ def create_app(sqlite_path: str | None = None) -> FastAPI:
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+            application.state.checkpointer = checkpointer
             application.state.chat_graph = build_chat_graph(checkpointer)
             application.state.group_chat_graph = build_group_chat_graph(checkpointer)
             yield

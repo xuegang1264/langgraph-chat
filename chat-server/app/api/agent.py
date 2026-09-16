@@ -5,12 +5,14 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from app.agent.mainGraph.node.main_chat import build_main_chat_model_messages
+from app.core.config import settings
 
 from app.schemas.chat import (
     ChatMessage,
     ChatRequest,
-    ChatResponse,
     GroupChatRequest,
     GroupChatResponse,
     HistoryResponse,
@@ -51,27 +53,81 @@ def serialize_message(message: BaseMessage) -> ChatMessage:
     )
 
 
-@router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True)
-async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
+async def stream_chat_events(
+    payload: ChatRequest,
+    request: Request,
+) -> AsyncIterator[str]:
     config = {"configurable": {"thread_id": payload.thread_id}}
     try:
-        result = await request.app.state.chat_graph.ainvoke(
-            {"current_message": payload.message},
-            config=config,
+        snapshot = await request.app.state.chat_graph.aget_state(config)
+        current_message = payload.message.strip()
+        user_message = HumanMessage(content=current_message)
+
+        if not settings.dashscope_api_key:
+            await request.app.state.chat_graph.aupdate_state(
+                config,
+                {"messages": [user_message]},
+                as_node="chat",
+            )
+            yield encode_sse("done", {"thread_id": payload.thread_id})
+            return
+
+        model_messages = build_main_chat_model_messages(
+            snapshot.values,
+            current_message,
         )
+        content_parts: list[str] = []
+        async for token in dashscope.chat_stream(
+            thread_id=payload.thread_id,
+            messages=model_messages,
+            model=settings.dashscope_model,
+            api_key=settings.dashscope_api_key,
+            base_url=settings.dashscope_base_url,
+        ):
+            content_parts.append(token)
+            yield encode_sse("token", {"token": token})
+
+        content = dashscope.clean_model_content("".join(content_parts))
+        assistant_message = AIMessage(content=content)
+        await request.app.state.chat_graph.aupdate_state(
+            config,
+            {"messages": [user_message, assistant_message]},
+            as_node="chat",
+        )
+        yield encode_sse(
+            "message",
+            serialize_message(assistant_message).model_dump(exclude_none=True),
+        )
+        yield encode_sse("done", {"thread_id": payload.thread_id})
     except dashscope.DashScopeError as exc:
         logging.warning(
-            "DashScope call failed: code=%s status_code=%s",
+            "DashScope stream call failed: code=%s status_code=%s",
             exc.code,
             exc.status_code,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"DashScope call failed: {exc.code}: {exc.message}",
-        ) from exc
+        yield encode_sse(
+            "error",
+            {
+                "detail": f"DashScope call failed: {exc.code}: {exc.message}",
+            },
+        )
+    except Exception as exc:
+        logging.exception("Chat stream failed unexpectedly")
+        yield encode_sse(
+            "error",
+            {
+                "detail": f"Chat stream failed: {exc}",
+            },
+        )
 
-    message = serialize_message(result["messages"][-1])
-    return ChatResponse(thread_id=payload.thread_id, message=message)
+
+@router.post("/chat")
+async def chat(payload: ChatRequest, request: Request) -> StreamingResponse:
+    return StreamingResponse(
+        stream_chat_events(payload, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.get(
@@ -90,6 +146,15 @@ async def history(
         thread_id=thread_id,
         messages=[serialize_message(message) for message in messages],
     )
+
+
+@router.delete("/history")
+async def delete_history(
+    request: Request,
+    thread_id: Annotated[str, Query(min_length=1)],
+) -> dict[str, str]:
+    await request.app.state.checkpointer.adelete_thread(thread_id)
+    return {"thread_id": thread_id}
 
 
 @group_chat_router.post(
@@ -192,3 +257,12 @@ async def group_history(
         thread_id=thread_id,
         messages=[serialize_message(message) for message in messages],
     )
+
+
+@group_chat_router.delete("/history")
+async def delete_group_history(
+    request: Request,
+    thread_id: Annotated[str, Query(min_length=1)],
+) -> dict[str, str]:
+    await request.app.state.checkpointer.adelete_thread(thread_id)
+    return {"thread_id": thread_id}

@@ -18,6 +18,18 @@ def restore_settings():
     object.__setattr__(settings, "dashscope_base_url", original_base_url)
 
 
+def sse_events(body: str) -> list[tuple[str, dict]]:
+    events = []
+    for raw_event in body.strip().split("\n\n"):
+        if not raw_event:
+            continue
+        lines = raw_event.splitlines()
+        event_type = lines[0].removeprefix("event: ")
+        event_data = json.loads(lines[1].removeprefix("data: "))
+        events.append((event_type, event_data))
+    return events
+
+
 def test_chat_and_history_survive_restart(tmp_path) -> None:
     object.__setattr__(settings, "dashscope_api_key", None)
     thread_id = str(uuid4())
@@ -30,10 +42,7 @@ def test_chat_and_history_survive_restart(tmp_path) -> None:
         )
 
     assert chat_response.status_code == 200
-    assert chat_response.json() == {
-        "thread_id": thread_id,
-        "message": {"role": "user", "content": "你好"},
-    }
+    assert sse_events(chat_response.text) == [("done", {"thread_id": thread_id})]
 
     with TestClient(create_app(sqlite_path)) as client:
         history_response = client.get(
@@ -60,13 +69,39 @@ def test_empty_history(tmp_path) -> None:
     assert response.json() == {"thread_id": thread_id, "messages": []}
 
 
+def test_delete_chat_history_removes_checkpoint(tmp_path) -> None:
+    object.__setattr__(settings, "dashscope_api_key", None)
+    thread_id = str(uuid4())
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        chat_response = client.post(
+            "/agent/chat",
+            json={"thread_id": thread_id, "message": "你好"},
+        )
+        delete_response = client.delete(
+            "/agent/history",
+            params={"thread_id": thread_id},
+        )
+        history_response = client.get(
+            "/agent/history",
+            params={"thread_id": thread_id},
+        )
+
+    assert chat_response.status_code == 200
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"thread_id": thread_id}
+    assert history_response.status_code == 200
+    assert history_response.json() == {"thread_id": thread_id, "messages": []}
+
+
 def test_dashscope_error_returns_bad_gateway(tmp_path, monkeypatch) -> None:
     object.__setattr__(settings, "dashscope_api_key", "test-key")
 
-    async def fail_chat(*args, **kwargs) -> str:
+    async def fail_chat_stream(*args, **kwargs):
         raise dashscope.DashScopeError("InvalidApiKey", "Invalid API-key provided.", 401)
+        yield
 
-    monkeypatch.setattr(dashscope, "chat", fail_chat)
+    monkeypatch.setattr(dashscope, "chat_stream", fail_chat_stream)
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -74,10 +109,13 @@ def test_dashscope_error_returns_bad_gateway(tmp_path, monkeypatch) -> None:
             json={"thread_id": str(uuid4()), "message": "你好"},
         )
 
-    assert response.status_code == 502
-    assert response.json() == {
-        "detail": "DashScope call failed: InvalidApiKey: Invalid API-key provided."
-    }
+    assert response.status_code == 200
+    assert sse_events(response.text) == [
+        (
+            "error",
+            {"detail": "DashScope call failed: InvalidApiKey: Invalid API-key provided."},
+        )
+    ]
 
 
 def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
@@ -87,11 +125,13 @@ def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
     sqlite_path = str(tmp_path / "checkpoints.sqlite")
     captured_messages = []
 
-    async def fake_chat(*args, **kwargs) -> str:
+    async def fake_chat_stream(*args, **kwargs):
         captured_messages.append(kwargs["messages"])
-        return f"回复 {len(captured_messages)}"
+        reply = f"回复 {len(captured_messages)}"
+        for token in ("回复 ", str(len(captured_messages))):
+            yield token
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_stream", fake_chat_stream)
 
     with TestClient(create_app(sqlite_path)) as client:
         first_response = client.post(
@@ -109,6 +149,18 @@ def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
+    assert sse_events(first_response.text) == [
+        ("token", {"token": "回复 "}),
+        ("token", {"token": "1"}),
+        ("message", {"role": "assistant", "content": "回复 1"}),
+        ("done", {"thread_id": thread_id}),
+    ]
+    assert sse_events(second_response.text) == [
+        ("token", {"token": "回复 "}),
+        ("token", {"token": "2"}),
+        ("message", {"role": "assistant", "content": "回复 2"}),
+        ("done", {"thread_id": thread_id}),
+    ]
     assert captured_messages == [
         [{"role": "user", "content": "第一句"}],
         [
@@ -198,6 +250,35 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
     }
 
 
+def test_delete_group_chat_history_removes_checkpoint(tmp_path) -> None:
+    object.__setattr__(settings, "dashscope_api_key", None)
+    thread_id = str(uuid4())
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        chat_response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "这个功能怎么做？",
+                "members": [{"name": "产品经理", "persona": "关注需求"}],
+            },
+        )
+        delete_response = client.delete(
+            "/group-chat/history",
+            params={"thread_id": thread_id},
+        )
+        history_response = client.get(
+            "/group-chat/history",
+            params={"thread_id": thread_id},
+        )
+
+    assert chat_response.status_code == 200
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"thread_id": thread_id}
+    assert history_response.status_code == 200
+    assert history_response.json() == {"thread_id": thread_id, "messages": []}
+
+
 def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
     object.__setattr__(settings, "dashscope_api_key", "test-key")
     object.__setattr__(settings, "dashscope_base_url", None)
@@ -241,12 +322,7 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
             params={"thread_id": thread_id},
         )
 
-    events = []
-    for raw_event in body.strip().split("\n\n"):
-        lines = raw_event.splitlines()
-        event_type = lines[0].removeprefix("event: ")
-        event_data = json.loads(lines[1].removeprefix("data: "))
-        events.append((event_type, event_data))
+    events = sse_events(body)
 
     assert response.status_code == 200
     assert router_calls == 1
