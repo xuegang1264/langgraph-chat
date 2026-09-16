@@ -100,19 +100,31 @@ async def run_role_node(
     member = find_member(state, role_name)
     user_persona = str(state.get("user_persona") or "未设置")
     thread_id = get_thread_id(config)
+    planned_sequence = list(state.get("role_sequence") or [])
 
     system_prompt = (
         f"你是群聊中的{role_name}。\n"
         f"你的角色人设：{member['persona'] or '按该岗位的专业职责发言'}。\n"
         f"用户在群聊中的身份/人设：{user_persona}。\n"
-        "请只代表你自己的角色发言，结合上下文给出具体、简洁、有推进价值的回复。"
-        "不要替其他角色总结，不要输出角色名前缀。"
+        f"本轮计划发言顺序：{', '.join(planned_sequence) if planned_sequence else '未规划'}。\n"
+        "请只代表你自己的角色发言，结合上下文给出具体、简洁、有推进价值的回复。不要替其他角色总结，不要输出角色名前缀。\n"
+        "你还需要判断是否必须请求重新编排后续发言顺序。只有满足以下任一条件时，need_replan 才能为 true：\n"
+        "1. 当前问题缺少继续推进所必需的关键信息，必须让更合适的未发言角色先介入；\n"
+        "2. 你发现原计划后续角色明显不适合继续当前讨论，继续按原顺序会降低回答质量；\n"
+        "3. 出现你无法处理、但某个未发言角色必须立即介入的重大风险或专业问题；\n"
+        "4. 你的回复改变了问题方向，原发言顺序已经不再匹配当前上下文。\n"
+        "普通补充、轻微不确定、希望别人再看看、礼貌性协作，都必须输出 need_replan=false。\n"
+        "只输出 JSON，不要输出其他文字。格式："
+        '{"content":"你的回复内容","need_replan":false,"replan_reason":""} '
+        '或 {"content":"你的回复内容","need_replan":true,"replan_reason":"必须重排的具体原因"}'
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history_for_model(state))
 
     if not settings.dashscope_api_key:
         content = f"我是{role_name}，当前还没有配置可用的模型调用密钥。"
+        need_replan = False
+        replan_reason = ""
     else:
         logger.info(
             "Group chat role LLM request: thread_id=%s role_name=%s model=%s messages=%s",
@@ -121,7 +133,13 @@ async def run_role_node(
             settings.dashscope_model,
             messages,
         )
-        content = await call_llm(thread_id=thread_id, messages=messages)
+        response_text = await call_llm(thread_id=thread_id, messages=messages)
+        response = parse_json_object(response_text)
+        content = str(response.get("content") or response_text).strip()
+        need_replan = bool(response.get("need_replan"))
+        replan_reason = str(response.get("replan_reason") or "").strip()
+        if need_replan and not replan_reason:
+            need_replan = False
 
     if role_name not in spoken_roles:
         spoken_roles.append(role_name)
@@ -129,5 +147,7 @@ async def run_role_node(
     return {
         "messages": [AIMessage(content=content, name=role_name)],
         "spoken_roles": spoken_roles,
+        "need_replan": need_replan,
+        "replan_reason": replan_reason if need_replan else "",
         "round_count": round_count + 1,
     }

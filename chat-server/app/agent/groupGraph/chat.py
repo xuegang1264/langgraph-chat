@@ -17,7 +17,7 @@ from app.agent.groupGraph.node.frontend_dev import frontend_dev_node
 from app.agent.groupGraph.node.pmo import pmo_node
 from app.agent.groupGraph.node.product_manager import product_manager_node
 from app.agent.groupGraph.node.project_manager import project_manager_node
-from app.agent.groupGraph.node.router import route_next_role, router_node
+from app.agent.groupGraph.node.router import route_after_role, route_next_role, router_node
 from app.agent.groupGraph.node.tester import tester_node
 
 
@@ -33,7 +33,10 @@ class GroupChatState(TypedDict):
     members: NotRequired[list[GroupMember]]
     spoken_roles: NotRequired[list[str]]
     next_role: NotRequired[str | None]
+    role_sequence: NotRequired[list[str]]
     should_end: NotRequired[bool]
+    need_replan: NotRequired[bool]
+    replan_reason: NotRequired[str]
     round_count: NotRequired[int]
     max_rounds: NotRequired[int]
 
@@ -66,6 +69,18 @@ def build_group_chat_graph(checkpointer: BaseCheckpointSaver | None = None):
             "end": END,
         },
     )
+    role_route_map = {
+        "product_manager": "product_manager",
+        "project_manager": "project_manager",
+        "pmo": "pmo",
+        "backend_dev": "backend_dev",
+        "frontend_dev": "frontend_dev",
+        "tester": "tester",
+        "architect": "architect",
+        "business_owner": "business_owner",
+        "router": "router",
+        "end": END,
+    }
     for node_name in (
         "product_manager",
         "project_manager",
@@ -76,6 +91,6 @@ def build_group_chat_graph(checkpointer: BaseCheckpointSaver | None = None):
         "architect",
         "business_owner",
     ):
-        graph.add_edge(node_name, "router")
+        graph.add_conditional_edges(node_name, route_after_role, role_route_map)
 
     return graph.compile(checkpointer=checkpointer)

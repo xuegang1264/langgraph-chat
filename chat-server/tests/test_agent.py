@@ -138,10 +138,14 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
         captured_calls.append(kwargs["messages"])
         system_prompt = kwargs["messages"][0]["content"]
         if "群聊发言调度" in system_prompt:
-            if len(captured_calls) == 1:
-                return '{"action":"continue","next_role":"产品经理","reason":"需要先明确需求"}'
-            return '{"action":"end","reason":"本轮已回答"}'
-        return "我先把需求边界和用户价值梳理清楚。"
+            return (
+                '{"action":"continue","role_sequence":["产品经理"],'
+                '"reason":"需要先明确需求"}'
+            )
+        return (
+            '{"content":"我先把需求边界和用户价值梳理清楚。",'
+            '"need_replan":false,"replan_reason":""}'
+        )
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
 
@@ -205,15 +209,14 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
         system_prompt = kwargs["messages"][0]["content"]
         if "群聊发言调度" in system_prompt:
             router_calls += 1
-            if router_calls == 1:
-                return '{"action":"continue","next_role":"产品经理","reason":"先定范围"}'
-            if router_calls == 2:
-                return '{"action":"continue","next_role":"后端开发","reason":"再看实现"}'
-            return '{"action":"end","reason":"本轮已回答"}'
+            return (
+                '{"action":"continue","role_sequence":["产品经理","后端开发"],'
+                '"reason":"先定范围，再看实现"}'
+            )
 
-        if "产品经理" in system_prompt:
-            return "先明确需求范围。"
-        return "接口和存储可以这样拆。"
+        if "你是群聊中的产品经理" in system_prompt:
+            return '{"content":"先明确需求范围。","need_replan":false,"replan_reason":""}'
+        return '{"content":"接口和存储可以这样拆。","need_replan":false,"replan_reason":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
 
@@ -246,6 +249,7 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
         events.append((event_type, event_data))
 
     assert response.status_code == 200
+    assert router_calls == 1
     assert events == [
         (
             "message",
@@ -270,6 +274,70 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
                 "role": "assistant",
                 "content": "接口和存储可以这样拆。",
                 "name": "后端开发",
+            },
+        ],
+    }
+
+
+def test_group_chat_replans_after_role_request(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    router_calls = 0
+
+    async def fake_chat(*args, **kwargs) -> str:
+        nonlocal router_calls
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            router_calls += 1
+            if router_calls == 1:
+                return (
+                    '{"action":"continue","role_sequence":["产品经理","后端开发"],'
+                    '"reason":"先定需求再看实现"}'
+                )
+            return (
+                '{"action":"continue","role_sequence":["架构师"],'
+                '"reason":"需要先评估架构风险"}'
+            )
+
+        if "你是群聊中的产品经理" in system_prompt:
+            return (
+                '{"content":"需求里有跨系统一致性风险，需要先让架构师评估。",'
+                '"need_replan":true,"replan_reason":"存在架构风险，架构师应先介入"}'
+            )
+        return '{"content":"这里要先确认服务边界和一致性策略。","need_replan":false,"replan_reason":""}'
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "这个功能怎么做？",
+                "members": [
+                    {"name": "产品经理", "persona": "关注需求"},
+                    {"name": "后端开发", "persona": "关注接口"},
+                    {"name": "架构师", "persona": "关注架构风险"},
+                ],
+                "max_rounds": 3,
+            },
+        )
+
+    assert response.status_code == 200
+    assert router_calls == 2
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "需求里有跨系统一致性风险，需要先让架构师评估。",
+                "name": "产品经理",
+            },
+            {
+                "role": "assistant",
+                "content": "这里要先确认服务边界和一致性策略。",
+                "name": "架构师",
             },
         ],
     }
