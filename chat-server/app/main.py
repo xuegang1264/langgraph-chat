@@ -1,13 +1,27 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from app.agent.groupGraph.chat import build_group_chat_graph
 from app.agent.mainGraph.chat import build_chat_graph
 from app.api.routes import router
 from app.core.config import settings
+
+
+def configure_logging() -> None:
+    level = getattr(logging, settings.app_log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
+    logging.getLogger("app").setLevel(level)
+
+
+configure_logging()
 
 
 def create_app(sqlite_path: str | None = None) -> FastAPI:
@@ -18,6 +32,7 @@ def create_app(sqlite_path: str | None = None) -> FastAPI:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
             application.state.chat_graph = build_chat_graph(checkpointer)
+            application.state.group_chat_graph = build_group_chat_graph(checkpointer)
             yield
 
     application = FastAPI(

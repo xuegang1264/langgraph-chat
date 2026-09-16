@@ -1,4 +1,5 @@
 from uuid import uuid4
+import json
 
 from fastapi.testclient import TestClient
 import pytest
@@ -123,5 +124,152 @@ def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
             {"role": "assistant", "content": "回复 1"},
             {"role": "user", "content": "第二句"},
             {"role": "assistant", "content": "回复 2"},
+        ],
+    }
+
+
+def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    captured_calls = []
+
+    async def fake_chat(*args, **kwargs) -> str:
+        captured_calls.append(kwargs["messages"])
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            if len(captured_calls) == 1:
+                return '{"action":"continue","next_role":"产品经理","reason":"需要先明确需求"}'
+            return '{"action":"end","reason":"本轮已回答"}'
+        return "我先把需求边界和用户价值梳理清楚。"
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "这个功能怎么做？",
+                "user_persona": "我是老板，关注投入产出比",
+                "members": [
+                    {
+                        "name": "产品经理",
+                        "persona": "关注用户需求和方案边界",
+                    },
+                    {
+                        "name": "后端开发",
+                        "persona": "关注接口和数据存储",
+                    },
+                ],
+                "max_rounds": 3,
+            },
+        )
+        history_response = client.get(
+            "/group-chat/history",
+            params={"thread_id": thread_id},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "我先把需求边界和用户价值梳理清楚。",
+                "name": "产品经理",
+            }
+        ],
+    }
+    assert history_response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {"role": "user", "content": "这个功能怎么做？"},
+            {
+                "role": "assistant",
+                "content": "我先把需求边界和用户价值梳理清楚。",
+                "name": "产品经理",
+            },
+        ],
+    }
+
+
+def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    router_calls = 0
+
+    async def fake_chat(*args, **kwargs) -> str:
+        nonlocal router_calls
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            router_calls += 1
+            if router_calls == 1:
+                return '{"action":"continue","next_role":"产品经理","reason":"先定范围"}'
+            if router_calls == 2:
+                return '{"action":"continue","next_role":"后端开发","reason":"再看实现"}'
+            return '{"action":"end","reason":"本轮已回答"}'
+
+        if "产品经理" in system_prompt:
+            return "先明确需求范围。"
+        return "接口和存储可以这样拆。"
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        with client.stream(
+            "POST",
+            "/group-chat/chat/stream",
+            json={
+                "thread_id": thread_id,
+                "message": "这个功能怎么做？",
+                "members": [
+                    {"name": "产品经理", "persona": "关注需求"},
+                    {"name": "后端开发", "persona": "关注接口"},
+                ],
+                "max_rounds": 3,
+            },
+        ) as response:
+            body = response.read().decode()
+
+        history_response = client.get(
+            "/group-chat/history",
+            params={"thread_id": thread_id},
+        )
+
+    events = []
+    for raw_event in body.strip().split("\n\n"):
+        lines = raw_event.splitlines()
+        event_type = lines[0].removeprefix("event: ")
+        event_data = json.loads(lines[1].removeprefix("data: "))
+        events.append((event_type, event_data))
+
+    assert response.status_code == 200
+    assert events == [
+        (
+            "message",
+            {"role": "assistant", "content": "先明确需求范围。", "name": "产品经理"},
+        ),
+        (
+            "message",
+            {
+                "role": "assistant",
+                "content": "接口和存储可以这样拆。",
+                "name": "后端开发",
+            },
+        ),
+        ("done", {"thread_id": thread_id}),
+    ]
+    assert history_response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {"role": "user", "content": "这个功能怎么做？"},
+            {"role": "assistant", "content": "先明确需求范围。", "name": "产品经理"},
+            {
+                "role": "assistant",
+                "content": "接口和存储可以这样拆。",
+                "name": "后端开发",
+            },
         ],
     }

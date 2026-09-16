@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.agent import router as agent_router
+from app.api.agent import group_chat_router, router as agent_router
 
 
 router = APIRouter()
 router.include_router(agent_router, prefix="/agent", tags=["agent"])
+router.include_router(group_chat_router, prefix="/group-chat", tags=["group-chat"])
 
 
 @router.get("/")

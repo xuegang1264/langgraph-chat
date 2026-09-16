@@ -1,9 +1,19 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import MarkdownIt from 'markdown-it'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'chatGroups'
+const LEGACY_PERSONA_STORAGE_KEY = 'chatGroupPersonas'
+const LEGACY_MAX_ROUNDS_STORAGE_KEY = 'chatGroupMaxRounds'
 const MAIN_CHAT_ID = 'e6ead6c0-9188-4fdd-b82d-51dbeeb283b3'
+const DEFAULT_MAX_ROUNDS = 5
+const DEFAULT_MESSAGES = [{ role: 'assistant', content: '你好，有什么可以帮你的？' }]
+const markdown = new MarkdownIt({
+  breaks: true,
+  html: false,
+  linkify: true
+})
 
 const members = [
   { name: '产品经理', persona: '关注用户需求，输出产品方案，把控需求范围，说话务实，会平衡业务和技术可行性。' },
@@ -20,12 +30,133 @@ const groups = ref([])
 const selectedGroupId = ref(MAIN_CHAT_ID)
 const selectedGroup = computed(() => groups.value.find(g => g.id === selectedGroupId.value))
 const isMainChat = computed(() => selectedGroupId.value === MAIN_CHAT_ID)
+const currentUserPersona = computed({
+  get() {
+    return selectedGroup.value?.userPersona || ''
+  },
+  set(value) {
+    if (!selectedGroup.value) return
+    selectedGroup.value.userPersona = value
+    saveGroups()
+  }
+})
+const currentMaxRounds = computed({
+  get() {
+    return selectedGroup.value?.maxRounds || DEFAULT_MAX_ROUNDS
+  },
+  set(value) {
+    if (!selectedGroup.value) return
+    selectedGroup.value.maxRounds = normalizeMaxRounds(value)
+    saveGroups()
+  }
+})
 
-const messages = ref([
-  { role: 'assistant', content: '你好，有什么可以帮你的？' }
-])
+function normalizeMaxRounds(value) {
+  return Math.min(100, Math.max(1, Number(value) || DEFAULT_MAX_ROUNDS))
+}
+
+function parseStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function normalizeGroup(group, legacyPersonas, legacyMaxRounds) {
+  return {
+    ...group,
+    userPersona:
+      typeof group.userPersona === 'string'
+        ? group.userPersona
+        : legacyPersonas[group.id] || '',
+    maxRounds: normalizeMaxRounds(
+      group.maxRounds ?? legacyMaxRounds[group.id] ?? DEFAULT_MAX_ROUNDS
+    ),
+    members: Array.isArray(group.members) ? group.members : []
+  }
+}
+
+function migrateGroups(rawGroups) {
+  const legacyPersonas = parseStoredJson(LEGACY_PERSONA_STORAGE_KEY, {})
+  const legacyMaxRounds = parseStoredJson(LEGACY_MAX_ROUNDS_STORAGE_KEY, {})
+  const nextGroups = rawGroups.map(group => normalizeGroup(group, legacyPersonas, legacyMaxRounds))
+
+  if (
+    nextGroups.length !== rawGroups.length ||
+    nextGroups.some((group, index) => {
+      const rawGroup = rawGroups[index]
+      return (
+        group.userPersona !== rawGroup.userPersona ||
+        group.maxRounds !== rawGroup.maxRounds ||
+        group.members !== rawGroup.members
+      )
+    })
+  ) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextGroups))
+  }
+
+  localStorage.removeItem(LEGACY_PERSONA_STORAGE_KEY)
+  localStorage.removeItem(LEGACY_MAX_ROUNDS_STORAGE_KEY)
+
+  return nextGroups
+}
+
+function createGroupConfig() {
+  return {
+    id: uuidv4(),
+    name: groupName.value.trim(),
+    intro: groupIntro.value.trim(),
+    members: selectedMembers.value.map(idx => members[idx]),
+    userPersona: '',
+    maxRounds: DEFAULT_MAX_ROUNDS,
+    createdAt: Date.now()
+  }
+}
+
+function loadGroups() {
+  const storedGroups = parseStoredJson(STORAGE_KEY, [])
+  groups.value = Array.isArray(storedGroups) ? migrateGroups(storedGroups) : []
+  selectedGroupId.value = MAIN_CHAT_ID
+}
+
+function saveGroups() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(groups.value))
+}
+
+function historyUrl(threadId) {
+  const basePath = threadId === MAIN_CHAT_ID ? '/api/agent/history' : '/api/group-chat/history'
+  return `${basePath}?thread_id=${encodeURIComponent(threadId)}`
+}
+
+function streamChatUrl(threadId) {
+  return threadId === MAIN_CHAT_ID ? '/api/agent/chat' : '/api/group-chat/chat/stream'
+}
+
+function buildChatPayload(threadId, content) {
+  if (threadId === MAIN_CHAT_ID) {
+    return {
+      thread_id: threadId,
+      message: content
+    }
+  }
+
+  const group = groups.value.find(item => item.id === threadId)
+  return {
+    thread_id: threadId,
+    message: content,
+    user_persona: group?.userPersona || '',
+    members: group?.members || [],
+    max_rounds: group?.maxRounds || DEFAULT_MAX_ROUNDS
+  }
+}
+
+const messages = ref([...DEFAULT_MESSAGES])
 const messageInput = ref('')
 const isSending = ref(false)
+const isLoadingHistory = ref(false)
+let historyRequestId = 0
 
 const showModal = ref(false)
 const groupName = ref('')
@@ -41,18 +172,109 @@ const availableMembers = computed(() => {
   return members.filter(m => !existing.has(m.name))
 })
 
-function loadGroups() {
-  const raw = localStorage.getItem(STORAGE_KEY)
-  groups.value = raw ? JSON.parse(raw) : []
-  selectedGroupId.value = MAIN_CHAT_ID
+function renderMarkdown(content) {
+  return markdown.render(content || '')
 }
 
-function saveGroups() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(groups.value))
+function parseSseEvent(rawEvent) {
+  const event = { type: 'message', data: '' }
+  const dataLines = []
+
+  for (const line of rawEvent.split(/\r?\n/)) {
+    if (line.startsWith('event:')) {
+      event.type = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+
+  event.data = dataLines.join('\n')
+  return event
+}
+
+async function handleGroupChatStream(response, threadId) {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary !== -1) {
+      const rawEvent = buffer.slice(0, boundary).trim()
+      buffer = buffer.slice(boundary + 2)
+
+      if (rawEvent) {
+        const event = parseSseEvent(rawEvent)
+        if (event.type === 'error') {
+          const data = JSON.parse(event.data)
+          throw new Error(data.detail || '群聊流式响应失败')
+        }
+
+        if (event.type === 'message' && selectedGroupId.value === threadId) {
+          messages.value.push(JSON.parse(event.data))
+          await scrollMessagesToBottom()
+        }
+      }
+
+      boundary = buffer.indexOf('\n\n')
+    }
+
+    if (done) break
+  }
+}
+
+async function scrollMessagesToBottom() {
+  await nextTick()
+  const container = document.querySelector('.chat-messages')
+  if (container) {
+    container.scrollTop = container.scrollHeight
+  }
+}
+
+async function loadHistory(threadId) {
+  const requestId = ++historyRequestId
+  isLoadingHistory.value = true
+
+  try {
+    const response = await fetch(historyUrl(threadId))
+
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+
+    const data = await response.json()
+    if (requestId !== historyRequestId) return
+
+    messages.value = data.messages.length > 0 ? data.messages : [...DEFAULT_MESSAGES]
+    await scrollMessagesToBottom()
+  } catch (error) {
+    if (requestId !== historyRequestId) return
+
+    messages.value = [
+      {
+        role: 'assistant',
+        content: `聊天记录加载失败：${error instanceof Error ? error.message : '未知错误'}`
+      }
+    ]
+  } finally {
+    if (requestId === historyRequestId) {
+      isLoadingHistory.value = false
+    }
+  }
 }
 
 function selectGroup(id) {
+  if (selectedGroupId.value === id) return
   selectedGroupId.value = id
+  messageInput.value = ''
+  loadHistory(id)
 }
 
 function openModal() {
@@ -68,16 +290,10 @@ function closeModal() {
 
 function confirmCreate() {
   if (!groupName.value.trim()) return
-  const newGroup = {
-    id: uuidv4(),
-    name: groupName.value.trim(),
-    intro: groupIntro.value.trim(),
-    members: selectedMembers.value.map(idx => members[idx]),
-    createdAt: Date.now()
-  }
+  const newGroup = createGroupConfig()
   groups.value.push(newGroup)
   saveGroups()
-  selectedGroupId.value = newGroup.id
+  selectGroup(newGroup.id)
   closeModal()
 }
 
@@ -125,39 +341,51 @@ function removeMember(member) {
 
 async function sendMessage() {
   const content = messageInput.value.trim()
-  if (!content || isSending.value || !isMainChat.value) return
+  if (!content || isSending.value || isLoadingHistory.value) return
 
+  const threadId = selectedGroupId.value
   messages.value.push({ role: 'user', content })
   messageInput.value = ''
   isSending.value = true
+  await scrollMessagesToBottom()
 
   try {
-    const response = await fetch('/api/agent/chat', {
+    const response = await fetch(streamChatUrl(threadId), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        thread_id: MAIN_CHAT_ID,
-        message: content
-      })
+      body: JSON.stringify(buildChatPayload(threadId, content))
     })
 
     if (!response.ok) {
       throw new Error(`请求失败: ${response.status}`)
     }
 
-    const data = await response.json()
-    messages.value.push(data.message)
+    if (threadId === MAIN_CHAT_ID) {
+      const data = await response.json()
+      if (selectedGroupId.value === threadId) {
+        messages.value.push(data.message)
+        await scrollMessagesToBottom()
+      }
+    } else {
+      await handleGroupChatStream(response, threadId)
+    }
   } catch (error) {
-    messages.value.push({
-      role: 'assistant',
-      content: `发送失败：${error instanceof Error ? error.message : '未知错误'}`
-    })
+    if (selectedGroupId.value === threadId) {
+      messages.value.push({
+        role: 'assistant',
+        content: `发送失败：${error instanceof Error ? error.message : '未知错误'}`
+      })
+      await scrollMessagesToBottom()
+    }
   } finally {
     isSending.value = false
   }
 }
 
-onMounted(loadGroups)
+onMounted(() => {
+  loadGroups()
+  loadHistory(selectedGroupId.value)
+})
 </script>
 
 <template>
@@ -190,13 +418,22 @@ onMounted(loadGroups)
       <main class="chat-main">
         <div class="chat-content">
           <div class="chat-messages">
+            <div v-if="isLoadingHistory" class="history-loading">加载聊天记录...</div>
             <div
               v-for="(msg, index) in messages"
               :key="index"
               class="message"
               :class="msg.role === 'user' ? 'message-right' : 'message-left'"
             >
-              <div class="bubble">{{ msg.content }}</div>
+              <div class="bubble">
+                <div v-if="msg.name" class="speaker-name">{{ msg.name }}</div>
+                <div
+                  v-if="msg.role === 'assistant'"
+                  class="markdown-body"
+                  v-html="renderMarkdown(msg.content)"
+                ></div>
+                <template v-else>{{ msg.content }}</template>
+              </div>
             </div>
           </div>
           <div class="chat-input">
@@ -204,14 +441,14 @@ onMounted(loadGroups)
               v-model="messageInput"
               type="text"
               placeholder="输入消息..."
-              :disabled="isSending || !isMainChat"
+              :disabled="isSending || isLoadingHistory"
               @keyup.enter="sendMessage"
             />
             <button
-              :disabled="isSending || !messageInput.trim() || !isMainChat"
+              :disabled="isSending || isLoadingHistory || !messageInput.trim()"
               @click="sendMessage"
             >
-              {{ isSending ? '发送中...' : '发送' }}
+              {{ isSending ? '发送中...' : isLoadingHistory ? '加载中...' : '发送' }}
             </button>
           </div>
         </div>
@@ -230,6 +467,33 @@ onMounted(loadGroups)
         <aside v-else-if="selectedGroup" class="group-info">
           <h2>{{ selectedGroup.name }}</h2>
           <p class="intro">{{ selectedGroup.intro || '暂无简介' }}</p>
+          <div class="persona-section">
+            <label for="user-persona">我的人设</label>
+            <textarea
+              id="user-persona"
+              v-model="currentUserPersona"
+              rows="4"
+              placeholder="例如：我是老板，关注投入产出比、交付风险和团队协作。"
+            ></textarea>
+          </div>
+          <div class="rounds-section">
+            <div class="rounds-header">
+              <label for="max-rounds">最大轮数</label>
+              <span>{{ currentMaxRounds }}</span>
+            </div>
+            <input
+              id="max-rounds"
+              v-model.number="currentMaxRounds"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+            />
+            <div class="rounds-scale">
+              <span>1</span>
+              <span>100</span>
+            </div>
+          </div>
           <div class="members-section">
             <div class="members-title">群成员</div>
             <div class="member-tags">
@@ -434,6 +698,16 @@ onMounted(loadGroups)
   gap: 16px;
 }
 
+.history-loading {
+  align-self: center;
+  padding: 8px 14px;
+  border-radius: 16px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+}
+
 .message {
   display: flex;
 }
@@ -462,10 +736,80 @@ onMounted(loadGroups)
   border-bottom-left-radius: 4px;
 }
 
+.speaker-name {
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .message-right .bubble {
   background: linear-gradient(135deg, var(--accent), #b056f5);
   color: #fff;
   border-bottom-right-radius: 4px;
+}
+
+.markdown-body :deep(*) {
+  margin-top: 0;
+}
+
+.markdown-body :deep(*:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown-body :deep(p) {
+  margin-bottom: 8px;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin-bottom: 8px;
+  padding-left: 20px;
+}
+
+.markdown-body :deep(li + li) {
+  margin-top: 4px;
+}
+
+.markdown-body :deep(a) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.markdown-body :deep(code) {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  font-size: 0.92em;
+}
+
+.markdown-body :deep(pre) {
+  overflow-x: auto;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #111827;
+  color: #f9fafb;
+}
+
+.markdown-body :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.markdown-body :deep(blockquote) {
+  margin-bottom: 8px;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent-border);
+  color: var(--text);
+}
+
+.message-right .markdown-body :deep(a),
+.message-right .markdown-body :deep(code) {
+  color: #fff;
 }
 
 .chat-input {
@@ -583,6 +927,90 @@ onMounted(loadGroups)
 
 .project-features li + li {
   margin-top: 8px;
+}
+
+.persona-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.persona-section label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.persona-section textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 92px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text-h);
+  font-size: 14px;
+  line-height: 1.5;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.persona-section textarea::placeholder {
+  color: var(--text);
+}
+
+.persona-section textarea:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.rounds-section {
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.rounds-header,
+.rounds-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rounds-header {
+  margin-bottom: 12px;
+}
+
+.rounds-header label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rounds-header span {
+  min-width: 36px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.rounds-section input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rounds-scale {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 12px;
 }
 
 .members-section {

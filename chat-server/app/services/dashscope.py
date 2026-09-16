@@ -1,11 +1,13 @@
 import asyncio
 import os
+import re
 
 from dashscope import Generation
 import httpx
 
 
 TOKEN_PLAN_BASE_URL = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+SAFETY_TAG_PATTERN = re.compile(r"<ds_safety>.*?</ds_safety>\s*(?:Safe\s*)?", re.DOTALL)
 
 
 class DashScopeError(RuntimeError):
@@ -14,6 +16,10 @@ class DashScopeError(RuntimeError):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+def clean_model_content(content: str) -> str:
+    return SAFETY_TAG_PATTERN.sub("", content).strip()
 
 
 async def chat(
@@ -49,7 +55,7 @@ async def chat(
     if response.status_code != 200:
         raise DashScopeError(response.code, response.message, response.status_code)
 
-    return response.output.choices[0].message.content
+    return clean_model_content(response.output.choices[0].message.content)
 
 
 async def _chat_openai_compatible(
@@ -85,4 +91,4 @@ async def _chat_openai_compatible(
             response.status_code,
         )
 
-    return data["choices"][0]["message"]["content"]
+    return clean_model_content(data["choices"][0]["message"]["content"])

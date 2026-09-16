@@ -1,4 +1,9 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, TypedDict
+
+try:
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
 
 from langchain_core.messages import AnyMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver

@@ -14,6 +14,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "Chat Server")
     app_version: str = os.getenv("APP_VERSION", "0.1.0")
     sqlite_path: str = os.getenv("SQLITE_PATH", "data/checkpoints.sqlite")
+    app_log_level: str = os.getenv("APP_LOG_LEVEL", "INFO")
     dashscope_api_key: str | None = os.getenv("DASHSCOPE_API_KEY")
     dashscope_model: str = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
     dashscope_base_url: str | None = os.getenv("DASHSCOPE_BASE_URL")
