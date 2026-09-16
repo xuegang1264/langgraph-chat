@@ -146,6 +146,7 @@ function buildChatPayload(threadId, content) {
   return {
     thread_id: threadId,
     message: content,
+    group_intro: group?.intro || '',
     user_persona: group?.userPersona || '',
     members: group?.members || [],
     max_rounds: group?.maxRounds || DEFAULT_MAX_ROUNDS

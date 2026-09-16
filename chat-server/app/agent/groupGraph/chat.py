@@ -29,6 +29,7 @@ class GroupMember(TypedDict):
 class GroupChatState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     current_message: NotRequired[str]
+    group_intro: NotRequired[str]
     user_persona: NotRequired[str]
     members: NotRequired[list[GroupMember]]
     spoken_roles: NotRequired[list[str]]

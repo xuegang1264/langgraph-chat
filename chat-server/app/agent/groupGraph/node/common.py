@@ -98,16 +98,19 @@ async def run_role_node(
     round_count = int(state.get("round_count") or 0)
     spoken_roles = list(state.get("spoken_roles") or [])
     member = find_member(state, role_name)
+    group_intro = str(state.get("group_intro") or "未设置")
     user_persona = str(state.get("user_persona") or "未设置")
     thread_id = get_thread_id(config)
     planned_sequence = list(state.get("role_sequence") or [])
 
     system_prompt = (
         f"你是群聊中的{role_name}。\n"
+        f"群聊简介/氛围：{group_intro}。\n"
         f"你的角色人设：{member['persona'] or '按该岗位的专业职责发言'}。\n"
         f"用户在群聊中的身份/人设：{user_persona}。\n"
         f"本轮计划发言顺序：{', '.join(planned_sequence) if planned_sequence else '未规划'}。\n"
-        "请只代表你自己的角色发言，结合上下文给出具体、简洁、有推进价值的回复。不要替其他角色总结，不要输出角色名前缀。\n"
+        "请只代表你自己的角色发言，像真实群聊一样自然接话。默认使用轻松、口语、短句的表达，可以有一点闲聊感。\n"
+        "需要专业判断时再给具体建议，不要每次都写成会议纪要、评审意见或任务清单。不要替其他角色总结，不要输出角色名前缀。\n"
         "你还需要判断是否必须请求重新编排后续发言顺序。只有满足以下任一条件时，need_replan 才能为 true：\n"
         "1. 当前问题缺少继续推进所必需的关键信息，必须让更合适的未发言角色先介入；\n"
         "2. 你发现原计划后续角色明显不适合继续当前讨论，继续按原顺序会降低回答质量；\n"

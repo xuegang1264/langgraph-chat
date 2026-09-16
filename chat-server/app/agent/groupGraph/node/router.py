@@ -96,6 +96,7 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
     prompt = (
         "你是一个多人群聊的调度节点。你需要一次性规划接下来需要发言的角色顺序，或者结束本轮讨论。\n"
         f"用户本轮发言：{current_message}\n"
+        f"群聊简介/氛围：{state.get('group_intro') or '未设置'}\n"
         f"用户人设：{state.get('user_persona') or '未设置'}\n"
         f"群聊成员：{', '.join(names)}\n"
         f"本轮已经发言的角色：{', '.join(spoken_roles) if spoken_roles else '无'}\n"

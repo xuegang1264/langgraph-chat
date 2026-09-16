@@ -27,6 +27,7 @@ group_chat_router = APIRouter()
 def group_chat_input(payload: GroupChatRequest) -> dict:
     return {
         "current_message": payload.message,
+        "group_intro": payload.group_intro,
         "user_persona": payload.user_persona,
         "members": [member.model_dump() for member in payload.members],
         "spoken_roles": [],
