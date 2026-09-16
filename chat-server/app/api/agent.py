@@ -30,12 +30,8 @@ def group_chat_input(payload: GroupChatRequest) -> dict:
         "group_intro": payload.group_intro,
         "user_persona": payload.user_persona,
         "members": [member.model_dump() for member in payload.members],
-        "spoken_roles": [],
         "next_role": None,
-        "role_sequence": [],
         "should_end": False,
-        "need_replan": False,
-        "replan_reason": "",
         "round_count": 0,
         "max_rounds": payload.max_rounds,
     }

@@ -191,12 +191,12 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
         system_prompt = kwargs["messages"][0]["content"]
         if "群聊发言调度" in system_prompt:
             return (
-                '{"action":"continue","role_sequence":["产品经理"],'
+                '{"action":"continue","next_role":"产品经理",'
                 '"reason":"需要先明确需求"}'
             )
         return (
             '{"content":"我先把需求边界和用户价值梳理清楚。",'
-            '"need_replan":false,"replan_reason":""}'
+            '"should_continue":false,"next_role":""}'
         )
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
@@ -291,13 +291,16 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
         if "群聊发言调度" in system_prompt:
             router_calls += 1
             return (
-                '{"action":"continue","role_sequence":["产品经理","后端开发"],'
+                '{"action":"continue","next_role":"产品经理",'
                 '"reason":"先定范围，再看实现"}'
             )
 
         if "你是群聊中的产品经理" in system_prompt:
-            return '{"content":"先明确需求范围。","need_replan":false,"replan_reason":""}'
-        return '{"content":"接口和存储可以这样拆。","need_replan":false,"replan_reason":""}'
+            return (
+                '{"content":"先明确需求范围。",'
+                '"should_continue":true,"next_role":"后端开发"}'
+            )
+        return '{"content":"接口和存储可以这样拆。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
 
@@ -355,7 +358,7 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
     }
 
 
-def test_group_chat_replans_after_role_request(tmp_path, monkeypatch) -> None:
+def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypatch) -> None:
     object.__setattr__(settings, "dashscope_api_key", "test-key")
     object.__setattr__(settings, "dashscope_base_url", None)
     thread_id = str(uuid4())
@@ -366,22 +369,17 @@ def test_group_chat_replans_after_role_request(tmp_path, monkeypatch) -> None:
         system_prompt = kwargs["messages"][0]["content"]
         if "群聊发言调度" in system_prompt:
             router_calls += 1
-            if router_calls == 1:
-                return (
-                    '{"action":"continue","role_sequence":["产品经理","后端开发"],'
-                    '"reason":"先定需求再看实现"}'
-                )
             return (
-                '{"action":"continue","role_sequence":["架构师"],'
-                '"reason":"需要先评估架构风险"}'
+                '{"action":"continue","next_role":"产品经理",'
+                '"reason":"先定需求再看实现"}'
             )
 
         if "你是群聊中的产品经理" in system_prompt:
             return (
                 '{"content":"需求里有跨系统一致性风险，需要先让架构师评估。",'
-                '"need_replan":true,"replan_reason":"存在架构风险，架构师应先介入"}'
+                '"should_continue":true,"next_role":"架构师"}'
             )
-        return '{"content":"这里要先确认服务边界和一致性策略。","need_replan":false,"replan_reason":""}'
+        return '{"content":"这里要先确认服务边界和一致性策略。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
 
@@ -401,7 +399,7 @@ def test_group_chat_replans_after_role_request(tmp_path, monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    assert router_calls == 2
+    assert router_calls == 1
     assert response.json() == {
         "thread_id": thread_id,
         "messages": [
@@ -415,5 +413,59 @@ def test_group_chat_replans_after_role_request(tmp_path, monkeypatch) -> None:
                 "content": "这里要先确认服务边界和一致性策略。",
                 "name": "架构师",
             },
+        ],
+    }
+
+
+def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    role_calls = []
+
+    async def fake_chat(*args, **kwargs) -> str:
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            return (
+                '{"action":"continue","next_role":"产品经理",'
+                '"reason":"先让产品接话"}'
+            )
+
+        if "你是群聊中的产品经理" in system_prompt:
+            role_calls.append("产品经理")
+            return (
+                '{"content":"群主先给个主题吧，要解决什么问题？",'
+                '"should_continue":true,"next_role":"后端开发"}'
+            )
+
+        role_calls.append("后端开发")
+        return '{"content":"我也想问下接口范围。","should_continue":false,"next_role":""}'
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "大家自由讨论",
+                "members": [
+                    {"name": "产品经理", "persona": "关注需求"},
+                    {"name": "后端开发", "persona": "关注接口"},
+                ],
+                "max_rounds": 5,
+            },
+        )
+
+    assert response.status_code == 200
+    assert role_calls == ["产品经理"]
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "群主先给个主题吧，要解决什么问题？",
+                "name": "产品经理",
+            }
         ],
     }

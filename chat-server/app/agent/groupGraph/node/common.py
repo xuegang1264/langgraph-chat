@@ -24,6 +24,20 @@ ROLE_NODE_BY_NAME = {
     "业务负责人": "business_owner",
 }
 
+USER_REFERENCE_WORDS = ("群主", "用户", "你", "您", "老板", "业务方")
+USER_INPUT_WORDS = (
+    "给",
+    "说",
+    "确认",
+    "明确",
+    "补充",
+    "提供",
+    "告诉",
+    "定",
+    "透个底",
+    "回复",
+)
+
 
 def get_thread_id(config: RunnableConfig) -> str:
     return str(config.get("configurable", {}).get("thread_id", ""))
@@ -38,6 +52,31 @@ def find_member(state: dict[str, Any], role_name: str) -> dict[str, str]:
         if member.get("name") == role_name:
             return {"name": member.get("name", ""), "persona": member.get("persona", "")}
     return {"name": role_name, "persona": ""}
+
+
+def valid_next_role(raw_role: Any, names: list[str]) -> str | None:
+    role_name = str(raw_role or "").strip()
+    if role_name in names:
+        return role_name
+    return None
+
+
+def asks_user_for_input(content: str) -> bool:
+    text = content.strip()
+    if not any(word in text for word in USER_REFERENCE_WORDS):
+        return False
+    if "?" in text or "？" in text:
+        return True
+    return any(word in text for word in USER_INPUT_WORDS)
+
+
+def latest_ai_message_waits_for_user(state: dict[str, Any]) -> bool:
+    for message in reversed(state.get("messages", [])):
+        if message.type == "human":
+            return False
+        if message.type == "ai":
+            return asks_user_for_input(str(message.content))
+    return False
 
 
 def to_model_message(message: BaseMessage) -> dict[str, str] | None:
@@ -96,38 +135,41 @@ async def run_role_node(
     role_name: str,
 ) -> dict[str, Any]:
     round_count = int(state.get("round_count") or 0)
-    spoken_roles = list(state.get("spoken_roles") or [])
+    max_rounds = int(state.get("max_rounds") or 5)
     member = find_member(state, role_name)
+    names = member_names(state)
     group_intro = str(state.get("group_intro") or "未设置")
     user_persona = str(state.get("user_persona") or "未设置")
     thread_id = get_thread_id(config)
-    planned_sequence = list(state.get("role_sequence") or [])
+
+    if latest_ai_message_waits_for_user(state):
+        return {"next_role": None, "should_end": True}
 
     system_prompt = (
         f"你是群聊中的{role_name}。\n"
         f"群聊简介/氛围：{group_intro}。\n"
         f"你的角色人设：{member['persona'] or '按该岗位的专业职责发言'}。\n"
         f"用户在群聊中的身份/人设：{user_persona}。\n"
-        f"本轮计划发言顺序：{', '.join(planned_sequence) if planned_sequence else '未规划'}。\n"
+        f"群聊成员：{', '.join(names)}。\n"
+        f"最多自动讨论条数：{max_rounds}，当前已生成 {round_count} 条。\n"
         "请只代表你自己的角色发言，像真实群聊一样自然接话。默认使用轻松、口语、短句的表达，可以有一点闲聊感。\n"
         "需要专业判断时再给具体建议，不要每次都写成会议纪要、评审意见或任务清单。不要替其他角色总结，不要输出角色名前缀。\n"
-        "你还需要判断是否必须请求重新编排后续发言顺序。只有满足以下任一条件时，need_replan 才能为 true：\n"
-        "1. 当前问题缺少继续推进所必需的关键信息，必须让更合适的未发言角色先介入；\n"
-        "2. 你发现原计划后续角色明显不适合继续当前讨论，继续按原顺序会降低回答质量；\n"
-        "3. 出现你无法处理、但某个未发言角色必须立即介入的重大风险或专业问题；\n"
-        "4. 你的回复改变了问题方向，原发言顺序已经不再匹配当前上下文。\n"
-        "普通补充、轻微不确定、希望别人再看看、礼貌性协作，都必须输出 need_replan=false。\n"
+        "你发言后需要判断群聊是否还应该继续。如果继续，请从群聊成员中选择下一位最适合自然接话的人。\n"
+        "可以回应用户，也可以回应上一位群成员；可以补充、反问、轻微分歧或顺着聊。尽量不要指定自己连续发言。\n"
+        "如果你的发言是在向用户、群主或业务方索要主题、目标、需求、时间、确认或补充信息，必须结束本轮，等待用户回复。\n"
+        "如果最近已经有人向用户要信息，不要换个说法重复追问，也要结束。\n"
+        "如果讨论已经自然收束，或者再聊只会重复，就结束。\n"
         "只输出 JSON，不要输出其他文字。格式："
-        '{"content":"你的回复内容","need_replan":false,"replan_reason":""} '
-        '或 {"content":"你的回复内容","need_replan":true,"replan_reason":"必须重排的具体原因"}'
+        '{"content":"你的回复内容","should_continue":true,"next_role":"角色名"} '
+        '或 {"content":"你的回复内容","should_continue":false,"next_role":""}'
     )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history_for_model(state))
 
     if not settings.dashscope_api_key:
         content = f"我是{role_name}，当前还没有配置可用的模型调用密钥。"
-        need_replan = False
-        replan_reason = ""
+        should_continue = False
+        next_role = None
     else:
         logger.info(
             "Group chat role LLM request: thread_id=%s role_name=%s model=%s messages=%s",
@@ -139,18 +181,23 @@ async def run_role_node(
         response_text = await call_llm(thread_id=thread_id, messages=messages)
         response = parse_json_object(response_text)
         content = str(response.get("content") or response_text).strip()
-        need_replan = bool(response.get("need_replan"))
-        replan_reason = str(response.get("replan_reason") or "").strip()
-        if need_replan and not replan_reason:
-            need_replan = False
+        should_continue = bool(response.get("should_continue"))
+        next_role = valid_next_role(response.get("next_role"), names)
 
-    if role_name not in spoken_roles:
-        spoken_roles.append(role_name)
+    if asks_user_for_input(content):
+        should_continue = False
+        next_role = None
+
+    next_round_count = round_count + 1
+    if next_round_count >= max_rounds or not should_continue or not next_role:
+        should_end = True
+        next_role = None
+    else:
+        should_end = False
 
     return {
         "messages": [AIMessage(content=content, name=role_name)],
-        "spoken_roles": spoken_roles,
-        "need_replan": need_replan,
-        "replan_reason": replan_reason if need_replan else "",
-        "round_count": round_count + 1,
+        "next_role": next_role,
+        "should_end": should_end,
+        "round_count": next_round_count,
     }

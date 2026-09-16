@@ -32,12 +32,8 @@ class GroupChatState(TypedDict):
     group_intro: NotRequired[str]
     user_persona: NotRequired[str]
     members: NotRequired[list[GroupMember]]
-    spoken_roles: NotRequired[list[str]]
     next_role: NotRequired[str | None]
-    role_sequence: NotRequired[list[str]]
     should_end: NotRequired[bool]
-    need_replan: NotRequired[bool]
-    replan_reason: NotRequired[str]
     round_count: NotRequired[int]
     max_rounds: NotRequired[int]
 
@@ -79,7 +75,6 @@ def build_group_chat_graph(checkpointer: BaseCheckpointSaver | None = None):
         "tester": "tester",
         "architect": "architect",
         "business_owner": "business_owner",
-        "router": "router",
         "end": END,
     }
     for node_name in (
