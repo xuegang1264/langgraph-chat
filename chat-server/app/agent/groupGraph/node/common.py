@@ -24,18 +24,35 @@ ROLE_NODE_BY_NAME = {
     "业务负责人": "business_owner",
 }
 
-USER_REFERENCE_WORDS = ("群主", "用户", "你", "您", "老板", "业务方")
-USER_INPUT_WORDS = (
-    "给",
-    "说",
-    "确认",
-    "明确",
-    "补充",
-    "提供",
-    "告诉",
-    "定",
-    "透个底",
-    "回复",
+USER_REQUEST_PATTERNS = (
+    r"(?:请|麻烦|烦请|需要|劳烦)(?:你|您|用户|群主|老板|业务方).{0,16}"
+    r"(?:先)?(?:给|说|确认|明确|补充|提供|回复|定|拍板|决定)",
+    r"(?:你|您|用户|群主|老板|业务方).{0,8}"
+    r"(?:能否|能不能|可否|是否可以|方便|可以).{0,16}"
+    r"(?:给|说|确认|明确|补充|提供|回复|定|拍板|决定)",
+    r"(?:你|您|用户|群主|老板|业务方)(?:先|也|这边)?"
+    r"(?:给|说|确认|明确|补充|提供|回复|定|拍板|决定)(?:下|一下|个)?",
+    r"(?:群主|用户|老板|业务方)先"
+    r"(?:给|说|确认|明确|补充|提供|回复|定|拍板|决定)(?:下|一下|个)?",
+)
+USER_REQUEST_QUESTION_PATTERNS = (
+    r"(?:你|您|用户|群主|老板|业务方).{0,16}"
+    r"(?:能否|能不能|可否|是否可以|方便|可以|要不要|需不需要|是否需要)",
+    r"(?:你这边|您这边|用户|群主|老板|业务方).{0,16}"
+    r"(?:是什么|是多少|定了吗|确认了吗|补充吗|提供吗)",
+)
+USER_REQUEST_TARGETS = (
+    "主题",
+    "目标",
+    "需求",
+    "时间",
+    "日期",
+    "预算",
+    "人数",
+    "范围",
+    "标准",
+    "背景",
+    "信息",
 )
 
 
@@ -61,13 +78,42 @@ def valid_next_role(raw_role: Any, names: list[str]) -> str | None:
     return None
 
 
+def fallback_next_role(current_role: str, names: list[str]) -> str | None:
+    if not names:
+        return None
+
+    if current_role not in names:
+        return names[0]
+
+    current_index = names.index(current_role)
+    for offset in range(1, len(names) + 1):
+        role_name = names[(current_index + offset) % len(names)]
+        if role_name != current_role:
+            return role_name
+    return None
+
+
+def minimum_discussion_rounds(max_rounds: int, member_count: int) -> int:
+    if max_rounds <= 2:
+        return max_rounds
+    return min(max_rounds, max(4, min(member_count, 8)))
+
+
 def asks_user_for_input(content: str) -> bool:
     text = content.strip()
-    if not any(word in text for word in USER_REFERENCE_WORDS):
+    has_request_target = any(target in text for target in USER_REQUEST_TARGETS)
+    if not has_request_target:
         return False
-    if "?" in text or "？" in text:
+
+    if any(re.search(pattern, text) for pattern in USER_REQUEST_PATTERNS):
         return True
-    return any(word in text for word in USER_INPUT_WORDS)
+
+    has_question_mark = "?" in text or "？" in text
+    if has_question_mark and any(
+        re.search(pattern, text) for pattern in USER_REQUEST_QUESTION_PATTERNS
+    ):
+        return True
+    return False
 
 
 def latest_ai_message_waits_for_user(state: dict[str, Any]) -> bool:
@@ -138,6 +184,7 @@ async def run_role_node(
     max_rounds = int(state.get("max_rounds") or 5)
     member = find_member(state, role_name)
     names = member_names(state)
+    min_rounds = minimum_discussion_rounds(max_rounds, len(names))
     group_intro = str(state.get("group_intro") or "未设置")
     user_persona = str(state.get("user_persona") or "未设置")
     thread_id = get_thread_id(config)
@@ -149,16 +196,18 @@ async def run_role_node(
         f"你是群聊中的{role_name}。\n"
         f"群聊简介/氛围：{group_intro}。\n"
         f"你的角色人设：{member['persona'] or '按该岗位的专业职责发言'}。\n"
-        f"用户在群聊中的身份/人设：{user_persona}。\n"
+        f"用户在群聊中的身份或主持控制要求：{user_persona}。\n"
         f"群聊成员：{', '.join(names)}。\n"
-        f"最多自动讨论条数：{max_rounds}，当前已生成 {round_count} 条。\n"
+        f"最多自动讨论条数：{max_rounds}，当前已生成 {round_count} 条，通常至少聊到 {min_rounds} 条再自然收束。\n"
+        "角色人设可能同时包含工作背景、生活偏好和说话风格。请根据当前话题自然选择侧重点：聊工作时专业，闲聊时像普通群友，不要强行转成项目分析。\n"
         "请只代表你自己的角色发言，像真实群聊一样自然接话。默认使用轻松、口语、短句的表达，可以有一点闲聊感。\n"
         "需要专业判断时再给具体建议，不要每次都写成会议纪要、评审意见或任务清单。不要替其他角色总结，不要输出角色名前缀。\n"
         "你发言后需要判断群聊是否还应该继续。如果继续，请从群聊成员中选择下一位最适合自然接话的人。\n"
         "可以回应用户，也可以回应上一位群成员；可以补充、反问、轻微分歧或顺着聊。尽量不要指定自己连续发言。\n"
         "如果你的发言是在向用户、群主或业务方索要主题、目标、需求、时间、确认或补充信息，必须结束本轮，等待用户回复。\n"
         "如果最近已经有人向用户要信息，不要换个说法重复追问，也要结束。\n"
-        "如果讨论已经自然收束，或者再聊只会重复，就结束。\n"
+        "如果还没聊够最低条数，且不是在等待用户回复，就尽量继续点下一位群成员接话，营造多人群聊感。\n"
+        "聊够最低条数后，如果讨论已经自然收束，或者再聊只会重复，就结束。\n"
         "只输出 JSON，不要输出其他文字。格式："
         '{"content":"你的回复内容","should_continue":true,"next_role":"角色名"} '
         '或 {"content":"你的回复内容","should_continue":false,"next_role":""}'
@@ -189,7 +238,13 @@ async def run_role_node(
         next_role = None
 
     next_round_count = round_count + 1
-    if next_round_count >= max_rounds or not should_continue or not next_role:
+    if next_round_count >= max_rounds:
+        should_end = True
+        next_role = None
+    elif next_round_count < min_rounds:
+        next_role = next_role or fallback_next_role(role_name, names)
+        should_end = not bool(next_role)
+    elif not should_continue or not next_role:
         should_end = True
         next_role = None
     else:

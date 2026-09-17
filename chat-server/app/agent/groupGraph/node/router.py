@@ -53,7 +53,7 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
         "你是一个多人群聊的发言调度节点。你只负责决定用户发起后第一位由谁接话，或者直接结束。\n"
         f"用户本轮发言：{current_message}\n"
         f"群聊简介/氛围：{state.get('group_intro') or '未设置'}\n"
-        f"用户人设：{state.get('user_persona') or '未设置'}\n"
+        f"用户身份或主持控制要求：{state.get('user_persona') or '未设置'}\n"
         f"群聊成员：{', '.join(names)}\n"
         f"最多自动讨论条数：{max_rounds}。\n"
         "如果不需要群成员接话，输出 action=end。否则选择最适合自然接第一句的群成员。\n"

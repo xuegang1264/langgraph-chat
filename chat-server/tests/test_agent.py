@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.core.config import settings
+from app.agent.groupGraph.node.common import asks_user_for_input
 from app.main import create_app
 from app.services import dashscope
 
@@ -218,7 +219,7 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
                         "persona": "关注接口和数据存储",
                     },
                 ],
-                "max_rounds": 3,
+                "max_rounds": 1,
             },
         )
         history_response = client.get(
@@ -315,7 +316,7 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
                     {"name": "产品经理", "persona": "关注需求"},
                     {"name": "后端开发", "persona": "关注接口"},
                 ],
-                "max_rounds": 3,
+                "max_rounds": 2,
             },
         ) as response:
             body = response.read().decode()
@@ -394,7 +395,7 @@ def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypat
                     {"name": "后端开发", "persona": "关注接口"},
                     {"name": "架构师", "persona": "关注架构风险"},
                 ],
-                "max_rounds": 3,
+                "max_rounds": 2,
             },
         )
 
@@ -467,5 +468,80 @@ def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -
                 "content": "群主先给个主题吧，要解决什么问题？",
                 "name": "产品经理",
             }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "你看，需求这东西每次都变，真离谱？",
+        "你看需求是什么鬼？这不就是反复横跳吗？",
+        "老板之前告诉我们预算别太离谱，这事挺现实的。",
+        "我先把需求范围说下，大家继续补充。",
+    ],
+)
+def test_asks_user_for_input_ignores_loose_keyword_matches(content: str) -> None:
+    assert asks_user_for_input(content) is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "群主先给个主题吧，要解决什么问题？",
+        "麻烦你确认下预算和时间。",
+        "老板方便补充一下背景信息吗？",
+    ],
+)
+def test_asks_user_for_input_detects_direct_user_requests(content: str) -> None:
+    assert asks_user_for_input(content) is True
+
+
+def test_group_chat_keeps_discussing_before_minimum_rounds(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    role_calls = []
+
+    async def fake_chat(*args, **kwargs) -> str:
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            return (
+                '{"action":"continue","next_role":"产品经理",'
+                '"reason":"先让产品接话"}'
+            )
+
+        if "你是群聊中的产品经理" in system_prompt:
+            role_calls.append("产品经理")
+            return '{"content":"我选方案1，轻松自由。","should_continue":false,"next_role":""}'
+
+        role_calls.append("后端开发")
+        return '{"content":"我也选方案1，别安排太满。","should_continue":false,"next_role":""}'
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "其他人从1和3里选一个",
+                "members": [
+                    {"name": "产品经理", "persona": "关注需求"},
+                    {"name": "后端开发", "persona": "关注接口"},
+                ],
+                "max_rounds": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    assert role_calls == ["产品经理", "后端开发", "产品经理", "后端开发"]
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {"role": "assistant", "content": "我选方案1，轻松自由。", "name": "产品经理"},
+            {"role": "assistant", "content": "我也选方案1，别安排太满。", "name": "后端开发"},
+            {"role": "assistant", "content": "我选方案1，轻松自由。", "name": "产品经理"},
+            {"role": "assistant", "content": "我也选方案1，别安排太满。", "name": "后端开发"},
         ],
     }

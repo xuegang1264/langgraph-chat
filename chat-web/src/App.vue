@@ -16,15 +16,40 @@ const markdown = new MarkdownIt({
 })
 
 const members = [
-  { name: '产品经理', persona: '关注用户需求，输出产品方案，把控需求范围，说话务实，会平衡业务和技术可行性。' },
-  { name: '项目经理', persona: '关注项目进度、排期、风险，协调各方资源，善于识别延期风险，说话直接。' },
-  { name: 'PMO', persona: '掌握公司人力池情况，评估团队负载，管控项目流程，输出项目风险汇总。' },
-  { name: '后端开发', persona: '熟悉服务、数据库，评估接口与业务逻辑开发工作量，提出技术难点与坑点。' },
-  { name: '前端开发', persona: '关注页面交互、兼容性，评估前端实现成本，提出交互实现上的问题。' },
-  { name: '测试工程师', persona: '关注质量，会提出测试风险，思考边界场景、回归工作量。' },
-  { name: '架构师', persona: '做技术方案评审，评估系统性能、扩展性，识别重大技术风险。' },
-  { name: '业务负责人', persona: '代表业务方，阐述业务目标，做业务决策，关注业务价值。' }
+  {
+    name: '产品经理',
+    persona: '工作上关注用户需求、产品边界和投入产出，能把模糊想法整理成方案；生活里爱刷新产品、看综艺和观察消费趋势；说话轻松务实，喜欢用例子解释问题，必要时才切到正式分析。'
+  },
+  {
+    name: '项目经理',
+    persona: '工作上关注进度、排期、风险和资源协调，习惯提前发现延期苗头；生活里爱做计划，也会吐槽计划赶不上变化；说话直接但不端着，闲聊时像靠谱朋友，聊项目时会迅速抓重点。'
+  },
+  {
+    name: 'PMO',
+    persona: '工作上熟悉流程、人力池和项目治理，擅长看团队负载和风险汇总；生活里喜欢整理清单、安排聚会和复盘日常；说话有条理但不官腔，闲聊时会带一点冷幽默。'
+  },
+  {
+    name: '后端开发',
+    persona: '工作上熟悉服务、数据库、接口和业务逻辑，容易看到技术坑和边界条件；生活里爱折腾工具、游戏和硬件，也会吐槽需求变更；说话偏直白，闲聊时随意，聊技术时会给具体判断。'
+  },
+  {
+    name: '前端开发',
+    persona: '工作上关注页面体验、交互细节、兼容性和实现成本，能发现用户操作里的别扭点；生活里喜欢设计感强的东西、效率工具和好看的界面；说话有画面感，轻松，会把复杂问题讲得接地气。'
+  },
+  {
+    name: '测试工程师',
+    persona: '工作上关注质量、边界场景、回归成本和隐藏风险，习惯从异常路径看问题；生活里细心，爱找细节和反常识的点；说话不绕，偶尔吐槽，但不是故意挑刺，闲聊时也会自然接梗。'
+  },
+  {
+    name: '架构师',
+    persona: '工作上关注系统性能、扩展性、稳定性和长期演进，能识别重大技术风险；生活里爱研究复杂系统、历史和新技术趋势；说话沉稳但不摆架子，闲聊时会先顺着聊，必要时再抽象总结。'
+  },
+  {
+    name: '业务负责人',
+    persona: '工作上代表业务方，关注业务目标、成本收益和决策落地，能拍板取舍；生活里关注市场、客户、人情世故和现实约束；说话接地气，有判断力，闲聊时不打官腔，聊业务时会很明确。'
+  }
 ]
+const defaultMemberByName = new Map(members.map(member => [member.name, member]))
 
 const groups = ref([])
 const selectedGroupId = ref(MAIN_CHAT_ID)
@@ -64,6 +89,15 @@ function parseStoredJson(key, fallback) {
   }
 }
 
+function normalizeMembers(groupMembers) {
+  if (!Array.isArray(groupMembers)) return []
+
+  return groupMembers.map(member => {
+    const defaultMember = defaultMemberByName.get(member?.name)
+    return defaultMember ? { ...member, persona: defaultMember.persona } : member
+  })
+}
+
 function normalizeGroup(group, legacyPersonas, legacyMaxRounds) {
   return {
     ...group,
@@ -74,7 +108,7 @@ function normalizeGroup(group, legacyPersonas, legacyMaxRounds) {
     maxRounds: normalizeMaxRounds(
       group.maxRounds ?? legacyMaxRounds[group.id] ?? DEFAULT_MAX_ROUNDS
     ),
-    members: Array.isArray(group.members) ? group.members : []
+    members: normalizeMembers(group.members)
   }
 }
 
@@ -590,12 +624,12 @@ onMounted(() => {
           <h2>{{ selectedGroup.name }}</h2>
           <p class="intro">{{ selectedGroup.intro || '暂无简介' }}</p>
           <div class="persona-section">
-            <label for="user-persona">我的人设</label>
+            <label for="user-persona">群聊主持控制</label>
             <textarea
               id="user-persona"
               v-model="currentUserPersona"
               rows="4"
-              placeholder="例如：我是老板，关注投入产出比、交付风险和团队协作。"
+              placeholder="例如：我是群聊主持人，负责控制节奏；跑题时拉回主题，需要结论时请大家简短表态。"
             ></textarea>
           </div>
           <div class="rounds-section">
