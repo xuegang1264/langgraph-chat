@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.core.config import settings
+from app.agent.groupGraph.node import common as group_common
 from app.agent.groupGraph.node.common import asks_user_for_input
+from app.agent.groupGraph.node.router import _sanitize_max_rounds
 from app.main import create_app
 from app.services import dashscope
 
@@ -29,6 +31,13 @@ def sse_events(body: str) -> list[tuple[str, dict]]:
         event_data = json.loads(lines[1].removeprefix("data: "))
         events.append((event_type, event_data))
     return events
+
+
+def completion_from_text_chat(text_chat):
+    async def fake_chat_completion(*args, **kwargs):
+        return {"role": "assistant", "content": await text_chat(*args, **kwargs)}
+
+    return fake_chat_completion
 
 
 def test_chat_and_history_survive_restart(tmp_path) -> None:
@@ -201,6 +210,7 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
         )
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -304,6 +314,7 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
         return '{"content":"接口和存储可以这样拆。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         with client.stream(
@@ -383,6 +394,7 @@ def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypat
         return '{"content":"这里要先确认服务边界和一致性策略。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -418,6 +430,235 @@ def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypat
     }
 
 
+def test_group_chat_router_can_reduce_max_rounds_for_single_answer(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    role_calls = []
+
+    async def fake_chat(*args, **kwargs) -> str:
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            return (
+                '{"action":"continue","next_role":"产品经理",'
+                '"max_rounds":1,"reason":"简单问题，一个角色回答即可"}'
+            )
+
+        if "你是群聊中的产品经理" in system_prompt:
+            role_calls.append("产品经理")
+            return (
+                '{"content":"我直接给一个简短结论。",'
+                '"should_continue":true,"next_role":"后端开发"}'
+            )
+
+        role_calls.append("后端开发")
+        return '{"content":"我补充技术细节。","should_continue":false,"next_role":""}'
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "这个按钮文案怎么写？",
+                "members": [
+                    {"name": "产品经理", "persona": "关注需求"},
+                    {"name": "后端开发", "persona": "关注接口"},
+                ],
+                "max_rounds": 5,
+            },
+        )
+
+    assert response.status_code == 200
+    assert role_calls == ["产品经理"]
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "我直接给一个简短结论。",
+                "name": "产品经理",
+            }
+        ],
+    }
+
+
+def test_group_chat_role_can_call_weather_tool(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    tool_calls = []
+
+    async def fake_run_tool(tool_name, tool_args):
+        tool_calls.append((tool_name, tool_args))
+        return "北京当前天气：多云，温度 30°C，湿度 44%"
+
+    async def fake_chat(*args, **kwargs) -> str:
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            return (
+                '{"action":"continue","next_role":"业务负责人",'
+                '"reason":"需要业务负责人结合天气判断"}'
+            )
+
+        return '{"content":"不应该走旧 chat","should_continue":false,"next_role":""}'
+
+    async def fake_chat_completion(*args, **kwargs):
+        messages = kwargs["messages"]
+        assert kwargs["tools"][0]["function"]["name"] == "query_qweather"
+        if messages[-1]["role"] == "tool":
+            assert messages[-1]["content"] == "北京当前天气：多云，温度 30°C，湿度 44%"
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"action":"respond","content":"北京现在多云，温度大概 30°C，'
+                    '户外活动要注意补水。","should_continue":false,"next_role":""}'
+                ),
+            }
+
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {
+                        "name": "query_qweather",
+                        "arguments": '{"location":"北京","intent":"current"}',
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(group_common, "run_tool", fake_run_tool)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "北京今天适合户外活动吗？",
+                "members": [
+                    {"name": "业务负责人", "persona": "关注现实约束"},
+                    {"name": "产品经理", "persona": "关注需求"},
+                ],
+                "max_rounds": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    assert tool_calls == [("query_qweather", {"location": "北京", "intent": "current"})]
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "北京现在多云，温度大概 30°C，户外活动要注意补水。",
+                "name": "业务负责人",
+            }
+        ],
+    }
+
+
+def test_group_chat_reuses_tool_result_within_same_turn(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "dashscope_api_key", "test-key")
+    object.__setattr__(settings, "dashscope_base_url", None)
+    thread_id = str(uuid4())
+    tool_calls = []
+
+    async def fake_run_tool(tool_name, tool_args):
+        tool_calls.append((tool_name, tool_args))
+        return "北京当前天气：多云，温度 30°C，湿度 44%"
+
+    async def fake_chat(*args, **kwargs) -> str:
+        system_prompt = kwargs["messages"][0]["content"]
+        if "群聊发言调度" in system_prompt:
+            return (
+                '{"action":"continue","next_role":"业务负责人",'
+                '"reason":"先结合天气判断"}'
+            )
+        return '{"content":"不应该走旧 chat","should_continue":false,"next_role":""}'
+
+    async def fake_chat_completion(*args, **kwargs):
+        messages = kwargs["messages"]
+        system_prompt = messages[0]["content"]
+        if messages[-1]["role"] != "tool":
+            if "你是群聊中的产品经理" in system_prompt:
+                assert "本轮对话已获取的工具结果" in system_prompt
+                assert "北京当前天气：多云，温度 30°C，湿度 44%" in system_prompt
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_weather",
+                        "type": "function",
+                        "function": {
+                            "name": "query_qweather",
+                            "arguments": '{"location":"北京","intent":"current"}',
+                        },
+                    }
+                ],
+            }
+
+        if "你是群聊中的业务负责人" in system_prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"action":"respond","content":"北京天气多云，户外可以安排，'
+                    '但注意补水。","should_continue":true,"next_role":"产品经理"}'
+                ),
+            }
+        return {
+            "role": "assistant",
+            "content": (
+                '{"action":"respond","content":"我沿用刚才查到的天气结果，'
+                '补充一下活动页提示就行。","should_continue":false,"next_role":""}'
+            ),
+        }
+
+    monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(group_common, "run_tool", fake_run_tool)
+
+    with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
+        response = client.post(
+            "/group-chat/chat",
+            json={
+                "thread_id": thread_id,
+                "message": "北京今天适合户外活动吗？",
+                "members": [
+                    {"name": "业务负责人", "persona": "关注现实约束"},
+                    {"name": "产品经理", "persona": "关注用户体验"},
+                ],
+                "max_rounds": 2,
+            },
+        )
+
+    assert response.status_code == 200
+    assert tool_calls == [("query_qweather", {"location": "北京", "intent": "current"})]
+    assert response.json() == {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "北京天气多云，户外可以安排，但注意补水。",
+                "name": "业务负责人",
+            },
+            {
+                "role": "assistant",
+                "content": "我沿用刚才查到的天气结果，补充一下活动页提示就行。",
+                "name": "产品经理",
+            },
+        ],
+    }
+
+
 def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -> None:
     object.__setattr__(settings, "dashscope_api_key", "test-key")
     object.__setattr__(settings, "dashscope_base_url", None)
@@ -443,6 +684,7 @@ def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -
         return '{"content":"我也想问下接口范围。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -497,6 +739,12 @@ def test_asks_user_for_input_detects_direct_user_requests(content: str) -> None:
     assert asks_user_for_input(content) is True
 
 
+def test_router_sanitize_max_rounds_caps_model_decision() -> None:
+    assert _sanitize_max_rounds("99", requested_max_rounds=10, member_count=3) == 3
+    assert _sanitize_max_rounds("0", requested_max_rounds=10, member_count=3) == 1
+    assert _sanitize_max_rounds("invalid", requested_max_rounds=10, member_count=3) == 10
+
+
 def test_group_chat_keeps_discussing_before_minimum_rounds(tmp_path, monkeypatch) -> None:
     object.__setattr__(settings, "dashscope_api_key", "test-key")
     object.__setattr__(settings, "dashscope_base_url", None)
@@ -519,6 +767,7 @@ def test_group_chat_keeps_discussing_before_minimum_rounds(tmp_path, monkeypatch
         return '{"content":"我也选方案1，别安排太满。","should_continue":false,"next_role":""}'
 
     monkeypatch.setattr(dashscope, "chat", fake_chat)
+    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(

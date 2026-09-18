@@ -32,6 +32,7 @@ class GroupChatState(TypedDict):
     group_intro: NotRequired[str]
     user_persona: NotRequired[str]
     members: NotRequired[list[GroupMember]]
+    tool_results: NotRequired[dict[str, dict]]
     next_role: NotRequired[str | None]
     should_end: NotRequired[bool]
     round_count: NotRequired[int]

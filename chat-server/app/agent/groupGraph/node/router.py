@@ -25,6 +25,16 @@ def _sanitize_next_role(raw_role: Any, names: list[str]) -> str | None:
     return None
 
 
+def _sanitize_max_rounds(raw_rounds: Any, requested_max_rounds: int, member_count: int) -> int:
+    try:
+        decided_rounds = int(raw_rounds)
+    except (TypeError, ValueError):
+        return requested_max_rounds
+
+    upper_bound = max(1, min(requested_max_rounds, member_count or requested_max_rounds, 100))
+    return max(1, min(decided_rounds, upper_bound))
+
+
 async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     current_message = str(state.get("current_message", "")).strip()
     round_count = int(state.get("round_count") or 0)
@@ -56,9 +66,12 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
         f"用户身份或主持控制要求：{state.get('user_persona') or '未设置'}\n"
         f"群聊成员：{', '.join(names)}\n"
         f"最多自动讨论条数：{max_rounds}。\n"
+        "你还要决定本轮实际自动讨论条数 max_rounds，用来控制有多少位角色发言。\n"
+        "判断规则：简单事实、天气、明确对象的问题通常 max_rounds=1；需要多角度讨论时设为 2-5；"
+        "用户明确说大家/每个人/所有角色都说时，设为群成员数量；不要超过上面给出的最多自动讨论条数。\n"
         "如果不需要群成员接话，输出 action=end。否则选择最适合自然接第一句的群成员。\n"
         "只输出 JSON，不要输出其他文字。格式："
-        '{"action":"continue","next_role":"角色名","reason":"原因"} '
+        '{"action":"continue","next_role":"角色名","max_rounds":1,"reason":"原因"} '
         '或 {"action":"end","reason":"原因"}'
     )
     messages = [
@@ -76,12 +89,19 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
     decision = parse_json_object(decision_text)
 
     next_role = None
+    decided_max_rounds = max_rounds
     if decision.get("action") == "continue":
         next_role = _sanitize_next_role(decision.get("next_role"), names) or names[0]
+        decided_max_rounds = _sanitize_max_rounds(
+            decision.get("max_rounds"),
+            max_rounds,
+            len(names),
+        )
 
     updates = {
         "should_end": not bool(next_role),
         "next_role": next_role,
+        "max_rounds": decided_max_rounds,
     }
     if current_message and round_count == 0:
         updates["messages"] = [HumanMessage(content=current_message)]

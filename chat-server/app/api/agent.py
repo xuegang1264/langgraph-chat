@@ -30,6 +30,7 @@ def group_chat_input(payload: GroupChatRequest) -> dict:
         "group_intro": payload.group_intro,
         "user_persona": payload.user_persona,
         "members": [member.model_dump() for member in payload.members],
+        "tool_results": {},
         "next_role": None,
         "should_end": False,
         "round_count": 0,
