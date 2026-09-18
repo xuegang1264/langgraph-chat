@@ -4,7 +4,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.core.config import settings
-from app.services import dashscope
+from app.services import tokenplan
 
 
 def _to_model_message(message: BaseMessage) -> dict[str, str] | None:
@@ -40,17 +40,17 @@ async def main_chat_node(state: dict[str, Any], config: RunnableConfig) -> dict[
         return {}
 
     user_message = HumanMessage(content=current_message)
-    if not settings.dashscope_api_key:
+    if not settings.tokenplan_api_key:
         return {"messages": [user_message]}
 
     messages = build_main_chat_model_messages(state, current_message)
 
-    content = await dashscope.chat(
+    content = await tokenplan.chat(
         thread_id=str(config.get("configurable", {}).get("thread_id", "")),
         messages=messages,
-        model=settings.dashscope_model,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
+        model=settings.tokenplan_model,
+        api_key=settings.tokenplan_api_key,
+        base_url=settings.tokenplan_base_url,
     )
 
     return {"messages": [user_message, AIMessage(content=content)]}

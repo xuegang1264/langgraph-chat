@@ -17,7 +17,7 @@ from app.schemas.chat import (
     GroupChatResponse,
     HistoryResponse,
 )
-from app.services import dashscope
+from app.services import tokenplan
 
 
 router = APIRouter()
@@ -61,7 +61,7 @@ async def stream_chat_events(
         current_message = payload.message.strip()
         user_message = HumanMessage(content=current_message)
 
-        if not settings.dashscope_api_key:
+        if not settings.tokenplan_api_key:
             await request.app.state.chat_graph.aupdate_state(
                 config,
                 {"messages": [user_message]},
@@ -75,17 +75,17 @@ async def stream_chat_events(
             current_message,
         )
         content_parts: list[str] = []
-        async for token in dashscope.chat_stream(
+        async for token in tokenplan.chat_stream(
             thread_id=payload.thread_id,
             messages=model_messages,
-            model=settings.dashscope_model,
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url,
+            model=settings.tokenplan_model,
+            api_key=settings.tokenplan_api_key,
+            base_url=settings.tokenplan_base_url,
         ):
             content_parts.append(token)
             yield encode_sse("token", {"token": token})
 
-        content = dashscope.clean_model_content("".join(content_parts))
+        content = tokenplan.clean_model_content("".join(content_parts))
         assistant_message = AIMessage(content=content)
         await request.app.state.chat_graph.aupdate_state(
             config,
@@ -97,16 +97,16 @@ async def stream_chat_events(
             serialize_message(assistant_message).model_dump(exclude_none=True),
         )
         yield encode_sse("done", {"thread_id": payload.thread_id})
-    except dashscope.DashScopeError as exc:
+    except tokenplan.TokenPlanError as exc:
         logging.warning(
-            "DashScope stream call failed: code=%s status_code=%s",
+            "TokenPlan stream call failed: code=%s status_code=%s",
             exc.code,
             exc.status_code,
         )
         yield encode_sse(
             "error",
             {
-                "detail": f"DashScope call failed: {exc.code}: {exc.message}",
+                "detail": f"TokenPlan call failed: {exc.code}: {exc.message}",
             },
         )
     except Exception as exc:
@@ -170,15 +170,15 @@ async def group_chat(payload: GroupChatRequest, request: Request) -> GroupChatRe
             group_chat_input(payload),
             config=config,
         )
-    except dashscope.DashScopeError as exc:
+    except tokenplan.TokenPlanError as exc:
         logging.warning(
-            "Group chat DashScope call failed: code=%s status_code=%s",
+            "Group chat TokenPlan call failed: code=%s status_code=%s",
             exc.code,
             exc.status_code,
         )
         raise HTTPException(
             status_code=502,
-            detail=f"DashScope call failed: {exc.code}: {exc.message}",
+            detail=f"TokenPlan call failed: {exc.code}: {exc.message}",
         ) from exc
 
     new_messages = result["messages"][previous_count:]
@@ -213,16 +213,16 @@ async def stream_group_chat_events(
                     )
 
         yield encode_sse("done", {"thread_id": payload.thread_id})
-    except dashscope.DashScopeError as exc:
+    except tokenplan.TokenPlanError as exc:
         logging.warning(
-            "Group chat stream DashScope call failed: code=%s status_code=%s",
+            "Group chat stream TokenPlan call failed: code=%s status_code=%s",
             exc.code,
             exc.status_code,
         )
         yield encode_sse(
             "error",
             {
-                "detail": f"DashScope call failed: {exc.code}: {exc.message}",
+                "detail": f"TokenPlan call failed: {exc.code}: {exc.message}",
             },
         )
 

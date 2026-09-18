@@ -9,16 +9,16 @@ from app.agent.groupGraph.node import common as group_common
 from app.agent.groupGraph.node.common import asks_user_for_input
 from app.agent.groupGraph.node.router import _sanitize_max_rounds
 from app.main import create_app
-from app.services import dashscope
+from app.services import tokenplan
 
 
 @pytest.fixture(autouse=True)
 def restore_settings():
-    original_api_key = settings.dashscope_api_key
-    original_base_url = settings.dashscope_base_url
+    original_api_key = settings.tokenplan_api_key
+    original_base_url = settings.tokenplan_base_url
     yield
-    object.__setattr__(settings, "dashscope_api_key", original_api_key)
-    object.__setattr__(settings, "dashscope_base_url", original_base_url)
+    object.__setattr__(settings, "tokenplan_api_key", original_api_key)
+    object.__setattr__(settings, "tokenplan_base_url", original_base_url)
 
 
 def sse_events(body: str) -> list[tuple[str, dict]]:
@@ -41,7 +41,7 @@ def completion_from_text_chat(text_chat):
 
 
 def test_chat_and_history_survive_restart(tmp_path) -> None:
-    object.__setattr__(settings, "dashscope_api_key", None)
+    object.__setattr__(settings, "tokenplan_api_key", None)
     thread_id = str(uuid4())
     sqlite_path = str(tmp_path / "checkpoints.sqlite")
 
@@ -68,7 +68,7 @@ def test_chat_and_history_survive_restart(tmp_path) -> None:
 
 
 def test_empty_history(tmp_path) -> None:
-    object.__setattr__(settings, "dashscope_api_key", None)
+    object.__setattr__(settings, "tokenplan_api_key", None)
     thread_id = str(uuid4())
     sqlite_path = str(tmp_path / "checkpoints.sqlite")
 
@@ -80,7 +80,7 @@ def test_empty_history(tmp_path) -> None:
 
 
 def test_delete_chat_history_removes_checkpoint(tmp_path) -> None:
-    object.__setattr__(settings, "dashscope_api_key", None)
+    object.__setattr__(settings, "tokenplan_api_key", None)
     thread_id = str(uuid4())
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
@@ -104,14 +104,14 @@ def test_delete_chat_history_removes_checkpoint(tmp_path) -> None:
     assert history_response.json() == {"thread_id": thread_id, "messages": []}
 
 
-def test_dashscope_error_returns_bad_gateway(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
+def test_tokenplan_error_returns_bad_gateway(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
 
     async def fail_chat_stream(*args, **kwargs):
-        raise dashscope.DashScopeError("InvalidApiKey", "Invalid API-key provided.", 401)
+        raise tokenplan.TokenPlanError("InvalidApiKey", "Invalid API-key provided.", 401)
         yield
 
-    monkeypatch.setattr(dashscope, "chat_stream", fail_chat_stream)
+    monkeypatch.setattr(tokenplan, "chat_stream", fail_chat_stream)
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -123,14 +123,14 @@ def test_dashscope_error_returns_bad_gateway(tmp_path, monkeypatch) -> None:
     assert sse_events(response.text) == [
         (
             "error",
-            {"detail": "DashScope call failed: InvalidApiKey: Invalid API-key provided."},
+            {"detail": "TokenPlan call failed: InvalidApiKey: Invalid API-key provided."},
         )
     ]
 
 
-def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+def test_tokenplan_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     sqlite_path = str(tmp_path / "checkpoints.sqlite")
     captured_messages = []
@@ -141,7 +141,7 @@ def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
         for token in ("回复 ", str(len(captured_messages))):
             yield token
 
-    monkeypatch.setattr(dashscope, "chat_stream", fake_chat_stream)
+    monkeypatch.setattr(tokenplan, "chat_stream", fake_chat_stream)
 
     with TestClient(create_app(sqlite_path)) as client:
         first_response = client.post(
@@ -191,8 +191,8 @@ def test_dashscope_chat_uses_checkpoint_history(tmp_path, monkeypatch) -> None:
 
 
 def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     captured_calls = []
 
@@ -209,8 +209,8 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
             '"should_continue":false,"next_role":""}'
         )
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -262,7 +262,7 @@ def test_group_chat_routes_roles_and_saves_checkpoint(tmp_path, monkeypatch) -> 
 
 
 def test_delete_group_chat_history_removes_checkpoint(tmp_path) -> None:
-    object.__setattr__(settings, "dashscope_api_key", None)
+    object.__setattr__(settings, "tokenplan_api_key", None)
     thread_id = str(uuid4())
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
@@ -291,8 +291,8 @@ def test_delete_group_chat_history_removes_checkpoint(tmp_path) -> None:
 
 
 def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     router_calls = 0
 
@@ -313,8 +313,8 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
             )
         return '{"content":"接口和存储可以这样拆。","should_continue":false,"next_role":""}'
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         with client.stream(
@@ -371,8 +371,8 @@ def test_group_chat_streams_each_role_node(tmp_path, monkeypatch) -> None:
 
 
 def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     router_calls = 0
 
@@ -393,8 +393,8 @@ def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypat
             )
         return '{"content":"这里要先确认服务边界和一致性策略。","should_continue":false,"next_role":""}'
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -431,8 +431,8 @@ def test_group_chat_role_selects_next_speaker_without_router(tmp_path, monkeypat
 
 
 def test_group_chat_router_can_reduce_max_rounds_for_single_answer(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     role_calls = []
 
@@ -454,8 +454,8 @@ def test_group_chat_router_can_reduce_max_rounds_for_single_answer(tmp_path, mon
         role_calls.append("后端开发")
         return '{"content":"我补充技术细节。","should_continue":false,"next_role":""}'
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -486,8 +486,8 @@ def test_group_chat_router_can_reduce_max_rounds_for_single_answer(tmp_path, mon
 
 
 def test_group_chat_role_can_call_weather_tool(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     tool_calls = []
 
@@ -533,8 +533,8 @@ def test_group_chat_role_can_call_weather_tool(tmp_path, monkeypatch) -> None:
             ],
         }
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", fake_chat_completion)
     monkeypatch.setattr(group_common, "run_tool", fake_run_tool)
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
@@ -566,8 +566,8 @@ def test_group_chat_role_can_call_weather_tool(tmp_path, monkeypatch) -> None:
 
 
 def test_group_chat_reuses_tool_result_within_same_turn(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     tool_calls = []
 
@@ -622,8 +622,8 @@ def test_group_chat_reuses_tool_result_within_same_turn(tmp_path, monkeypatch) -
             ),
         }
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", fake_chat_completion)
     monkeypatch.setattr(group_common, "run_tool", fake_run_tool)
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
@@ -660,8 +660,8 @@ def test_group_chat_reuses_tool_result_within_same_turn(tmp_path, monkeypatch) -
 
 
 def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     role_calls = []
 
@@ -683,8 +683,8 @@ def test_group_chat_stops_when_role_asks_user_for_input(tmp_path, monkeypatch) -
         role_calls.append("后端开发")
         return '{"content":"我也想问下接口范围。","should_continue":false,"next_role":""}'
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(
@@ -746,8 +746,8 @@ def test_router_sanitize_max_rounds_caps_model_decision() -> None:
 
 
 def test_group_chat_keeps_discussing_before_minimum_rounds(tmp_path, monkeypatch) -> None:
-    object.__setattr__(settings, "dashscope_api_key", "test-key")
-    object.__setattr__(settings, "dashscope_base_url", None)
+    object.__setattr__(settings, "tokenplan_api_key", "test-key")
+    object.__setattr__(settings, "tokenplan_base_url", None)
     thread_id = str(uuid4())
     role_calls = []
 
@@ -766,8 +766,8 @@ def test_group_chat_keeps_discussing_before_minimum_rounds(tmp_path, monkeypatch
         role_calls.append("后端开发")
         return '{"content":"我也选方案1，别安排太满。","should_continue":false,"next_role":""}'
 
-    monkeypatch.setattr(dashscope, "chat", fake_chat)
-    monkeypatch.setattr(dashscope, "chat_completion", completion_from_text_chat(fake_chat))
+    monkeypatch.setattr(tokenplan, "chat", fake_chat)
+    monkeypatch.setattr(tokenplan, "chat_completion", completion_from_text_chat(fake_chat))
 
     with TestClient(create_app(str(tmp_path / "checkpoints.sqlite"))) as client:
         response = client.post(

@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.core.config import settings
 from app.agent.tools.registry import run_tool, tool_schemas
-from app.services import dashscope
+from app.services import tokenplan
 
 
 logger = logging.getLogger(__name__)
@@ -167,12 +167,12 @@ async def call_llm(
     messages: list[dict[str, str]],
     model: str | None = None,
 ) -> str:
-    return await dashscope.chat(
+    return await tokenplan.chat(
         thread_id=thread_id,
         messages=messages,
-        model=model or settings.dashscope_model,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
+        model=model or settings.tokenplan_model,
+        api_key=settings.tokenplan_api_key,
+        base_url=settings.tokenplan_base_url,
     )
 
 
@@ -183,12 +183,12 @@ async def call_llm_message(
     tools: list[dict[str, Any]] | None = None,
     tool_choice: str | dict[str, Any] | None = "auto",
 ) -> dict[str, Any]:
-    return await dashscope.chat_completion(
+    return await tokenplan.chat_completion(
         thread_id=thread_id,
         messages=messages,
-        model=model or settings.dashscope_model,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
+        model=model or settings.tokenplan_model,
+        api_key=settings.tokenplan_api_key,
+        base_url=settings.tokenplan_base_url,
         tools=tools,
         tool_choice=tool_choice,
     )
@@ -364,7 +364,7 @@ async def run_role_node(
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history_for_model(state))
 
-    if not settings.dashscope_api_key:
+    if not settings.tokenplan_api_key:
         content = f"我是{role_name}，当前还没有配置可用的模型调用密钥。"
         should_continue = False
         next_role = None
@@ -373,7 +373,7 @@ async def run_role_node(
             "Group chat role LLM request: thread_id=%s role_name=%s model=%s messages=%s",
             thread_id,
             role_name,
-            settings.dashscope_model,
+            settings.tokenplan_model,
             messages,
         )
         response, tool_results = await run_role_llm_with_tools(

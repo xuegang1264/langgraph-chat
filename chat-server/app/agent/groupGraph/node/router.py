@@ -53,7 +53,7 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
             updates["messages"] = [HumanMessage(content=current_message)]
         return updates
 
-    if not settings.dashscope_api_key:
+    if not settings.tokenplan_api_key:
         updates = {"should_end": True, "next_role": None}
         if current_message and round_count == 0:
             updates["messages"] = [HumanMessage(content=current_message)]
@@ -82,7 +82,7 @@ async def router_node(state: dict[str, Any], config: RunnableConfig) -> dict[str
     logger.info(
         "Group chat router LLM request: thread_id=%s model=%s messages=%s",
         get_thread_id(config),
-        settings.dashscope_model,
+        settings.tokenplan_model,
         messages,
     )
     decision_text = await call_llm(thread_id=get_thread_id(config), messages=messages)

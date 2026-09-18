@@ -530,6 +530,13 @@ async function sendMessage() {
   }
 }
 
+function handleMessageEnter(event) {
+  if (event.isComposing) return
+
+  event.preventDefault()
+  sendMessage()
+}
+
 onMounted(() => {
   loadGroups()
   loadHistory(selectedGroupId.value)
@@ -593,13 +600,13 @@ onMounted(() => {
             </div>
           </div>
           <div class="chat-input">
-            <input
+            <textarea
               v-model="messageInput"
-              type="text"
               placeholder="输入消息..."
               :disabled="isCurrentSending || isLoadingHistory"
-              @keyup.enter="sendMessage"
-            />
+              rows="2"
+              @keydown.enter.exact="handleMessageEnter"
+            ></textarea>
             <button
               :disabled="isCurrentSending || isLoadingHistory || !messageInput.trim()"
               @click="sendMessage"
@@ -1008,29 +1015,34 @@ onMounted(() => {
   border-top: 1px solid var(--border);
   background: var(--bg);
   display: flex;
+  align-items: flex-end;
   gap: 12px;
   box-sizing: border-box;
   flex-shrink: 0;
 }
 
-.chat-input input {
+.chat-input textarea {
   flex: 1;
   padding: 12px 18px;
   border: 1px solid var(--border);
-  border-radius: 24px;
+  border-radius: 18px;
   background: var(--bg);
   color: var(--text-h);
   font-size: 15px;
+  line-height: 1.5;
   outline: none;
+  min-height: 48px;
+  max-height: 144px;
+  resize: vertical;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-.chat-input input::placeholder {
+.chat-input textarea::placeholder {
   color: var(--text);
 }
 
-.chat-input input:focus {
+.chat-input textarea:focus {
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
@@ -1052,7 +1064,7 @@ onMounted(() => {
   box-shadow: 0 4px 12px rgba(170, 59, 255, 0.25);
 }
 
-.chat-input input:disabled,
+.chat-input textarea:disabled,
 .chat-input button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
